@@ -1,4 +1,4 @@
-"""Scorer module — aggregates 5 quantitative + 2 qualitative dimension scores
+"""Scorer module -- aggregates 6 quantitative + 2 qualitative dimension scores
 into a final ScoreResult.
 
 Dimensions:
@@ -7,8 +7,9 @@ Dimensions:
   D3 cashflow       (quantitative)
   D4 valuation      (quantitative)
   D5 growth         (quantitative)
-  D6 ownership      (qualitative, human-provided 0-5)
-  D7 strategy       (qualitative, human-provided 0-5)
+  D6 dividend       (quantitative) -- NEW
+  D7 ownership      (qualitative, human-provided 0-5)
+  D8 strategy       (qualitative, human-provided 0-5)
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from datetime import date
 from typing import Dict, List, Optional
 
 from src.data.models import ScoreResult
-from src.analysis import profitability, health, cashflow, valuation, growth
+from src.analysis import profitability, health, cashflow, valuation, growth, dividend_quality
 from src.analysis.benchmarks import get_benchmark
 
 
@@ -215,6 +216,58 @@ def _build_growth_data(financial_data: dict,
     }
 
 
+def _build_dividend_data(financial_data: dict, price_data: dict,
+                         all_annual_data: list | None = None) -> dict:
+    """Build dividend quality input data.
+
+    Uses dividend_per_share from financial_data (if available) or
+    falls back to computing from total_dividends / shares_outstanding.
+    """
+    dps = financial_data.get("dividend_per_share") or 0
+    shares = financial_data.get("shares_outstanding") or 0
+    total_div = financial_data.get("total_dividends") or 0
+
+    # If dps not directly available, try to compute
+    if dps == 0 and total_div > 0 and shares > 0:
+        dps = total_div / shares
+
+    price = price_data.get("close_price") or 0
+    eps = financial_data.get("eps") or 0
+
+    has_dividend = dps > 0
+    dy = dps / price if price > 0 else 0
+    pr = dps / eps if eps > 0 else None
+
+    # Historical dividend per share for growth trend
+    historical_dps = []
+    if all_annual_data:
+        for d in all_annual_data:
+            d_dps = d.get("dividend_per_share") or 0
+            d_shares = d.get("shares_outstanding") or 0
+            d_total = d.get("total_dividends") or 0
+            if d_dps == 0 and d_total > 0 and d_shares > 0:
+                d_dps = d_total / d_shares
+            historical_dps.append(d_dps)
+
+    return {
+        "dividend_yield": dy,
+        "payout_ratio": pr,
+        "dividend_growth_rates": _compute_dps_growth(historical_dps),
+        "has_dividend": has_dividend,
+    }
+
+
+def _compute_dps_growth(dps_list: list[float]) -> list[float]:
+    """Compute year-over-year growth rates from a list of DPS values."""
+    rates = []
+    for i in range(1, len(dps_list)):
+        prev = dps_list[i - 1]
+        curr = dps_list[i]
+        if prev and prev > 0:
+            rates.append((curr - prev) / prev)
+    return rates
+
+
 # ---------------------------------------------------------------------------
 # Main scoring function
 # ---------------------------------------------------------------------------
@@ -280,7 +333,11 @@ def score_all(
     grow_input = _build_growth_data(financial_data, all_annual_data)
     grow_result = growth.score(grow_input)
 
-    # --- D6-D7 qualitative (human-provided) ---
+    # --- D6 dividend quality (NEW) ---
+    div_input = _build_dividend_data(financial_data, price_data, all_annual_data)
+    div_result = dividend_quality.score(div_input)
+
+    # --- D7-D8 qualitative (human-provided) ---
     ownership_score = qualitative_scores.get("ownership_score", 0)
     strategy_score = qualitative_scores.get("strategy_score", 0)
 
@@ -293,6 +350,7 @@ def score_all(
         cashflow_score=cf_result["score"],
         valuation_score=val_result["score"],
         growth_score=grow_result["score"],
+        dividend_score=div_result["score"],
         ownership_score=ownership_score,
         strategy_score=strategy_score,
     )
@@ -309,6 +367,8 @@ def score_all(
     all_details.extend(val_result.get("details", []))
     all_details.append("--- Growth ---")
     all_details.extend(grow_result.get("details", []))
+    all_details.append("--- Dividend Quality ---")
+    all_details.extend(div_result.get("details", []))
     all_details.append(f"--- Ownership (qualitative) --- score: {ownership_score}/5")
     all_details.append(f"--- Strategy  (qualitative) --- score: {strategy_score}/5")
 
@@ -320,6 +380,7 @@ def score_all(
         "cashflow_score": sr.cashflow_score,
         "valuation_score": sr.valuation_score,
         "growth_score": sr.growth_score,
+        "dividend_score": sr.dividend_score,
         "ownership_score": sr.ownership_score,
         "strategy_score": sr.strategy_score,
         "total_score": sr.total_score,
@@ -349,12 +410,12 @@ def generate_signal_text(score_result: dict) -> str:
     health = score_result.get("health_score", 0)
 
     if signal == "BUY":
-        if valuation >= 4 and total >= 29:
+        if valuation >= 4 and total >= 33:
             return "🟢 买入 — 优质且便宜"
         return "🟢 买入 — 具备投资价值"
 
     if signal == "HOLD":
-        if total >= 22:
+        if total >= 26:
             return "🟡 持有 — 基本面良好"
         return "🟡 持有 — 观察后续表现"
 
@@ -364,6 +425,6 @@ def generate_signal_text(score_result: dict) -> str:
     # signal == "REDUCE"
     if health < 2:
         return "🔴 减仓 — 财务健康堪忧"
-    if total <= 7:
+    if total <= 8:
         return "🔴 减仓 — 综合评分过低"
     return "🔴 减仓 — 存在明显风险"

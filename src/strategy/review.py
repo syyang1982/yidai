@@ -301,7 +301,8 @@ class ReviewEngine:
             total_score,
             cur["profitability_score"], cur["health_score"],
             cur["cashflow_score"], cur["valuation_score"],
-            cur["growth_score"], cur["ownership_score"],
+            cur["growth_score"], cur.get("dividend_score", 0),
+            cur["ownership_score"],
             cur["strategy_score"],
         )
 
@@ -704,7 +705,8 @@ class ReviewEngine:
             total_score,
             cur["profitability_score"], cur["health_score"],
             cur["cashflow_score"], cur["valuation_score"],
-            cur["growth_score"], cur["ownership_score"],
+            cur["growth_score"], cur.get("dividend_score", 0),
+            cur["ownership_score"],
             cur["strategy_score"],
         )
 

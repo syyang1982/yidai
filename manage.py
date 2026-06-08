@@ -1039,7 +1039,66 @@ def cmd_anomaly(args):
         print(f"\n共检测 {len(companies)} 家公司，发现 {total_alerts} 条异常预警")
 
 
+def cmd_dividend(args):
+    """分红追踪命令。"""
+    from src.analysis.dividend_tracker import (
+        add_dividend, format_calendar_report, get_annual_summary,
+        get_upcoming_dividends,
+    )
+    from datetime import date, timedelta
+
+    action = args.div_action or "calendar"
+
+    if action == "calendar":
+        start = args.start or date.today().isoformat()
+        end = args.end or (date.today() + timedelta(days=90)).isoformat()
+        print(format_calendar_report(start, end))
+
+    elif action == "add":
+        if not args.ticker or not args.ex_date or not args.amount:
+            print("用法: python manage.py dividend add --ticker 01810.HK --ex-date 2026-06-01 --amount 0.50")
+            return
+        add_dividend(
+            ticker=args.ticker,
+            ex_date=args.ex_date,
+            amount=args.amount,
+            currency=args.currency,
+            div_type=args.type,
+            note=args.note or "",
+        )
+
+    elif action == "summary":
+        summary = get_annual_summary(args.year)
+        print(f"\n  {args.year}年度分红汇总")
+        print("  " + "=" * 50)
+        for ticker, info in summary.get("tickers", {}).items():
+            print(
+                f"  {info['name']:<10}({ticker:<10})  "
+                f"{info['div_count']}次  "
+                f"{info['currency']} {info['total_amount']:,.2f}  "
+                f"(≈HKD {info['hkd_equivalent']:,.2f})"
+            )
+        print("  " + "-" * 50)
+        print(f"  合计: ≈HKD {summary['total_hkd']:,.2f}")
+
+    elif action == "upcoming":
+        days = args.days or 60
+        divs = get_upcoming_dividends(days)
+        if not divs:
+            print(f"  未来{days}天内无分红事件")
+        else:
+            print(f"\n  未来{days}天分红预告")
+            print("  " + "=" * 60)
+            for d in divs:
+                print(
+                    f"  {d['ex_date']}  {d['name']:<8}({d['ticker']:<10})  "
+                    f"{d['currency']} {d['amount']:.4f}/股 × {d['shares']:,}股 = "
+                    f"{d['currency']} {d['total_amount']:,.2f}"
+                )
+
+
 def main():
+    """Entry point for the YiDai investment analysis CLI."""
     parser = argparse.ArgumentParser(
         prog="manage.py",
         description="意怠工程 — 个人投研系统管理工具",
@@ -1138,6 +1197,22 @@ def main():
     p_anomaly = subparsers.add_parser("anomaly", help="运行异常检测")
     p_anomaly.add_argument("ticker", nargs="?", help="股票代码 (如 01810.HK)，不指定则检测所有公司")
 
+    # dividend
+    p_dividend = subparsers.add_parser("dividend", help="分红追踪：日历/记录/预告")
+    p_dividend.add_argument("div_action", nargs="?", default="calendar",
+                            choices=["calendar", "add", "summary", "upcoming"],
+                            help="操作: calendar/add/summary/upcoming")
+    p_dividend.add_argument("--start", help="起始日期 (YYYY-MM-DD)")
+    p_dividend.add_argument("--end", help="结束日期 (YYYY-MM-DD)")
+    p_dividend.add_argument("--days", type=int, default=60, help="预告天数 (默认60)")
+    p_dividend.add_argument("--year", type=int, default=2026, help="汇总年度")
+    p_dividend.add_argument("--ticker", help="股票代码")
+    p_dividend.add_argument("--ex-date", dest="ex_date", help="除净日 (YYYY-MM-DD)")
+    p_dividend.add_argument("--amount", type=float, help="每股股息")
+    p_dividend.add_argument("--currency", default="HKD", help="币种")
+    p_dividend.add_argument("--type", default="final", help="类型 (final/interim/special)")
+    p_dividend.add_argument("--note", help="备注")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1157,6 +1232,7 @@ def main():
         "decision": cmd_decision,
         "test": cmd_test,
         "anomaly": cmd_anomaly,
+        "dividend": cmd_dividend,
     }
 
     func = commands.get(args.command)

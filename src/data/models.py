@@ -1,11 +1,11 @@
-"""
-Data models for the 意怠工程 (Yidai) investment analysis system.
+"""Data models for the YiDai investment analysis system.
 
-7-dimension scoring framework:
+8-dimension scoring framework:
   D1-D5: quantitative (profitability, health, cashflow, valuation, growth)
-  D6-D7: qualitative  (ownership, strategy) — human-scored
+  D6:    quantitative (dividend quality) -- auto-computed
+  D7-D8: qualitative  (ownership, strategy) -- human-scored
 
-Grades:  A(29-35) B(22-28) C(15-21) D(8-14) F(0-7)
+Grades:  A(33-40) B(26-32) C(17-25) D(9-16) F(0-8)
 Signals: BUY / HOLD / WATCH / REDUCE
 """
 
@@ -110,12 +110,12 @@ class QualitativeAssessment:
 # ---------------------------------------------------------------------------
 # 5. ScoreResult  (auto-computed total / grade / signal)
 # ---------------------------------------------------------------------------
-# Grading thresholds
+# Grading thresholds (8 dimensions, max 40)
 _GRADE_THRESHOLDS = [
-    (29, "A"),
-    (22, "B"),
-    (15, "C"),
-    (8,  "D"),
+    (33, "A"),
+    (26, "B"),
+    (17, "C"),
+    (9,  "D"),
     (0,  "F"),
 ]
 
@@ -134,20 +134,20 @@ def _compute_signal(
     cashflow: int,
     valuation: int,
     growth: int,
+    dividend: int,
     ownership: int,
     strategy: int,
 ) -> str:
     """Determine BUY / HOLD / WATCH / REDUCE signal.
 
     Priority (highest first):
-      1. Critical failure  → REDUCE
+      1. Critical failure -> REDUCE
          health < 2  OR  cashflow < 2  OR  ownership < 1
-      2. Very low total    → REDUCE   (total <= 7)
-      3. Low total         → REDUCE   (total <= 14)
-      4. Any dim < 2       → REDUCE
-      5. Strong + cheap    → BUY      (total >= 29  AND  valuation >= 4)
-      6. Adequate          → HOLD     (total >= 15)
-      7. Otherwise         → WATCH
+      2. Very low total -> REDUCE (total <= 16)
+      3. Any dim < 2 -> REDUCE
+      4. Strong + cheap -> BUY (total >= 33 AND valuation >= 4)
+      5. Adequate -> HOLD (total >= 17)
+      6. Otherwise -> WATCH
     """
     scores = [profitability, health, cashflow, valuation, growth, ownership, strategy]
 
@@ -155,49 +155,50 @@ def _compute_signal(
     if health < 2 or cashflow < 2 or ownership < 1:
         return "REDUCE"
 
-    # 2-3. Very low or low total
-    if total <= 14:
+    # 2. Very low total
+    if total <= 16:
         return "REDUCE"
 
-    # 4. Any single dimension critically low
+    # 3. Any single dimension critically low
     if any(s < 2 for s in scores):
         return "REDUCE"
 
-    # 5. Strong buy signal
-    if total >= 29 and valuation >= 4:
+    # 4. Strong buy signal (adjusted for 8-dim scale)
+    if total >= 33 and valuation >= 4:
         return "BUY"
 
-    # 6. Hold-worthy
-    if total >= 15:
+    # 5. Hold-worthy
+    if total >= 17:
         return "HOLD"
 
-    # 7. Default
+    # 6. Default
     return "WATCH"
 
 
 @dataclass
 class ScoreResult:
-    """Composite investment score across all 7 dimensions.
+    """Composite investment score across all 8 dimensions.
 
-    ``total_score``, ``grade``, and ``signal`` are **not** constructor
-    parameters — they are computed automatically in ``__post_init__``
-    from the seven dimension scores.
+    ``total_score``, ``grade``, and ``signal`` are not constructor
+    parameters -- they are computed automatically in ``__post_init__``
+    from the eight dimension scores.
 
     Each dimension score is an integer in [0, 5], so total_score ranges
-    from 0 to 35.
+    from 0 to 40.
     """
 
     ticker: str
     date: date
 
-    # The seven dimensions (each 0-5)
-    profitability_score: int = 0   # D1 – ROE / margins
-    health_score: int = 0          # D2 – leverage / liquidity
-    cashflow_score: int = 0        # D3 – FCF / OCF quality
-    valuation_score: int = 0       # D4 – P/E / P/B / P/S
-    growth_score: int = 0          # D5 – revenue / earnings growth
-    ownership_score: int = 0       # D6 – qualitative (human)
-    strategy_score: int = 0        # D7 – qualitative (human)
+    # The eight dimensions (each 0-5)
+    profitability_score: int = 0   # D1 - ROE / margins
+    health_score: int = 0          # D2 - leverage / liquidity
+    cashflow_score: int = 0        # D3 - FCF / OCF quality
+    valuation_score: int = 0       # D4 - P/E / P/B / P/S
+    growth_score: int = 0          # D5 - revenue / earnings growth
+    dividend_score: int = 0        # D6 - dividend quality (auto)
+    ownership_score: int = 0       # D7 - qualitative (human)
+    strategy_score: int = 0        # D8 - qualitative (human)
 
     # --- auto-computed (excluded from __init__) ---
     total_score: int = field(init=False)
@@ -211,6 +212,7 @@ class ScoreResult:
             + self.cashflow_score
             + self.valuation_score
             + self.growth_score
+            + self.dividend_score
             + self.ownership_score
             + self.strategy_score
         )
@@ -222,6 +224,7 @@ class ScoreResult:
             self.cashflow_score,
             self.valuation_score,
             self.growth_score,
+            self.dividend_score,
             self.ownership_score,
             self.strategy_score,
         )

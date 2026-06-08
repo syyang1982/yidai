@@ -1,0 +1,147 @@
+{
+  "metadata": {
+    "last_updated": "2026-06-08",
+    "description": "持仓分红追踪数据"
+  },
+  "holdings": {
+    "01810.HK": {
+      "name": "小米集团",
+      "shares": 36000,
+      "currency": "HKD",
+      "dividends": []
+    },
+    "09988.HK": {
+      "name": "阿里巴巴",
+      "shares": 2500,
+      "currency": "USD",
+      "dividends": [
+        {
+          "ex_date": "2025-06-11",
+          "amount": 1.9587,
+          "currency": "HKD",
+          "type": "final",
+          "year": "FY2025"
+        },
+        {
+          "ex_date": "2026-06-10",
+          "amount": 0.131,
+          "currency": "USD",
+          "type": "interim",
+          "year": "FY2026",
+          "note": "已公告待确认"
+        }
+      ]
+    },
+    "03888.HK": {
+      "name": "金山软件",
+      "shares": 3400,
+      "currency": "HKD",
+      "dividends": [
+        {
+          "ex_date": "2026-06-01",
+          "amount": 0.13,
+          "currency": "HKD",
+          "type": "final",
+          "year": "FY2025"
+        }
+      ]
+    },
+    "02020.HK": {
+      "name": "安踏体育",
+      "shares": 600,
+      "currency": "HKD",
+      "dividends": [
+        {
+          "ex_date": "2026-05-15",
+          "amount": 1.08,
+          "currency": "HKD",
+          "type": "final",
+          "year": "FY2025"
+        }
+      ]
+    },
+    "09999.HK": {
+      "name": "网易",
+      "shares": 200,
+      "currency": "HKD",
+      "dividends": [
+        {
+          "ex_date": "2026-06-04",
+          "amount": 1.1282,
+          "currency": "HKD",
+          "type": "interim",
+          "year": "FY2026"
+        }
+      ]
+    },
+    "09896.HK": {
+      "name": "名创优品",
+      "shares": 1000,
+      "currency": "HKD",
+      "dividends": []
+    },
+    "09626.HK": {
+      "name": "B站",
+      "shares": 200,
+      "currency": "HKD",
+      "dividends": []
+    },
+    "02498.HK": {
+      "name": "速腾聚创",
+      "shares": 500,
+      "currency": "HKD",
+      "dividends": []
+    },
+    "02252.HK": {
+      "name": "微创机器人",
+      "shares": 500,
+      "currency": "HKD",
+      "dividends": []
+    },
+    "03896.HK": {
+      "name": "金山云",
+      "shares": 4000,
+      "currency": "HKD",
+      "dividends": []
+    },
+    "LX": {
+      "name": "乐信",
+      "shares": 2250,
+      "currency": "USD",
+      "dividends": []
+    },
+    "SGP.AX": {
+      "name": "Stockland",
+      "shares": 1100,
+      "currency": "AUD",
+      "dividends": [
+        {
+          "ex_date": "2025-06-27",
+          "amount": 0.172,
+          "currency": "AUD",
+          "type": "distribution",
+          "year": "FY2025"
+        },
+        {
+          "ex_date": "2025-12-30",
+          "amount": 0.09,
+          "currency": "AUD",
+          "type": "distribution",
+          "year": "FY2026"
+        }
+      ]
+    },
+    "159227.SZ": {
+      "name": "航空航天ETF",
+      "shares": 10200,
+      "currency": "CNY",
+      "dividends": []
+    }
+  },
+  "fx_rates": {
+    "USD_HKD": 7.8,
+    "AUD_HKD": 5.1,
+    "CNY_HKD": 1.08,
+    "USD_CNY": 7.2
+  }
+}

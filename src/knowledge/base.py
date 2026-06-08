@@ -79,10 +79,10 @@ def _normalize_scores(scores: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 _GRADE_THRESHOLDS = [
-    (29, "A"),
-    (22, "B"),
-    (15, "C"),
-    (8, "D"),
+    (33, "A"),
+    (26, "B"),
+    (17, "C"),
+    (9, "D"),
     (0, "F"),
 ]
 
@@ -96,29 +96,30 @@ def _compute_grade(total: int) -> str:
 
 def _compute_signal(total: int, scores: dict) -> str:
     """Compute BUY / HOLD / WATCH / REDUCE signal from scores dict."""
-    prof = scores.get("盈利", 0)
-    health = scores.get("健康", 0)
-    cf = scores.get("现金流", 0)
-    val = scores.get("估值", 0)
-    grow = scores.get("成长", 0)
-    own = scores.get("股东", 0)
-    strat = scores.get("战略", 0)
+    prof = scores.get("\u76c8\u5229", 0)
+    health = scores.get("\u5065\u5eb7", 0)
+    cf = scores.get("\u73b0\u91d1\u6d41", 0)
+    val = scores.get("\u4f30\u503c", 0)
+    grow = scores.get("\u6210\u957f", 0)
+    div = scores.get("\u5206\u7ea2", 0)
+    own = scores.get("\u80a1\u4e1c", 0)
+    strat = scores.get("\u6218\u7565", 0)
     all_scores = [prof, health, cf, val, grow, own, strat]
 
     # Critical dimension failures
     if health < 2 or cf < 2 or own < 1:
         return "REDUCE"
-    # Very low or low total
-    if total <= 14:
+    # Very low total (adjusted for 8-dim)
+    if total <= 16:
         return "REDUCE"
     # Any single dimension critically low
     if any(s < 2 for s in all_scores):
         return "REDUCE"
-    # Strong buy signal
-    if total >= 29 and val >= 4:
+    # Strong buy signal (adjusted for 8-dim)
+    if total >= 33 and val >= 4:
         return "BUY"
-    # Hold-worthy
-    if total >= 15:
+    # Hold-worthy (adjusted for 8-dim)
+    if total >= 17:
         return "HOLD"
     # Default
     return "WATCH"
@@ -369,7 +370,7 @@ class KnowledgeBase:
 | 股东 | 0/5 | → |
 | 战略 | 0/5 | → |
 
-**总分:** 0/35 **等级:** F **信号:** REDUCE
+**总分:** 0/40 **等级:** F **信号:** REDUCE
 
 ## 历史变化
 | 日期 | 事件 | 评分 | 关键变化 |
@@ -440,19 +441,19 @@ class KnowledgeBase:
         score_section = "| 维度 | 评分 | 趋势 |\n"
         score_section += "|------|------|------|\n"
         score_section += "\n".join(score_lines)
-        score_section += f"\n\n**总分:** {total}/35 **等级:** {grade} **信号:** {signal}"
+        score_section += f"\n\n**总分:** {total}/40 **等级:** {grade} **信号:** {signal}"
 
         content = self._update_section(content, "当前评分", score_section)
 
         # Add history row
         changes_str = ", ".join(changes) if changes else "无变化"
-        history_row = f"| {event_date} | 评分更新 | {total}/35 | {changes_str} |"
+        history_row = f"| {event_date} | 评分更新 | {total}/40 | {changes_str} |"
 
         # Find and append to history table
         content = self._append_to_table(
             content, "历史变化",
             ["日期", "事件", "评分", "关键变化"],
-            [event_date, "评分更新", f"{total}/35", changes_str],
+            [event_date, "评分更新", f"{total}/40", changes_str],
         )
 
         self._write_markdown(path, content)
@@ -739,7 +740,7 @@ class KnowledgeBase:
             scores[dim] = {"score": val, "trend": trend}
 
         # Parse total/grade/signal
-        total_match = re.search(r"\*\*总分:\*\*\s*(\d+)/35", content)
+        total_match = re.search(r"\*\*总分:\*\*\s*(\d+)/40", content)
         grade_match = re.search(r"\*\*等级:\*\*\s*(\w)", content)
         signal_match = re.search(r"\*\*信号:\*\*\s*(\w+)", content)
         total = int(total_match.group(1)) if total_match else 0
@@ -968,7 +969,7 @@ class KnowledgeBase:
         scores_str = ""
         try:
             profile = self.get_company_profile(ticker)
-            scores_str = f"{profile['total']}/35 ({profile['grade']}, {profile['signal']})"
+            scores_str = f"{profile['total']}/40 ({profile['grade']}, {profile['signal']})"
         except FileNotFoundError:
             scores_str = "无数据"
 
@@ -1039,7 +1040,7 @@ class KnowledgeBase:
             info = profile["scores"].get(dim, {"score": 0, "trend": "→"})
             score_rows.append([dim, f"{info['score']}/5", info.get("trend", "→")])
         lines.append(self._format_table(["维度", "评分", "趋势"], score_rows))
-        lines.append(f"\n**总分:** {profile['total']}/35 **等级:** {profile['grade']} **信号:** {profile['signal']}\n")
+        lines.append(f"\n**总分:** {profile['total']}/40 **等级:** {profile['grade']} **信号:** {profile['signal']}\n")
 
         # Recent history (last 3)
         if profile["history"]:
@@ -1086,7 +1087,7 @@ class KnowledgeBase:
                 comp_rows.append([
                     c["ticker"],
                     c["name"],
-                    f"{c['total']}/35",
+                    f"{c['total']}/40",
                     c["grade"],
                     c["signal"],
                 ])

@@ -395,6 +395,7 @@ class BacktestEngine:
                 cf_res["score"],
                 val_res["score"],
                 grow_res["score"],
+                0,  # dividend_score (not available in backtest)
                 own,
                 strat,
             )
