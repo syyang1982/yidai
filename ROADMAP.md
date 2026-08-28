@@ -108,42 +108,39 @@
 
 ---
 
-## 模块六：信号准确率审计 ✅ 规划完成
+## 模块六：信号准确率审计 ✅ 已完成 (2026-08-28)
 
 > **目标：** 用已有750条信号数据做回溯审计，验证评分系统是否有预测力
-> **详细计划：** [2026-08-28-three-pillars-plan.md](docs/plans/2026-08-28-three-pillars-plan.md)
 
 | # | 工作项 | 描述 | 状态 |
 |---|--------|------|------|
-| W6.1 | 准确率审计模块 | `src/analysis/accuracy_audit.py` — 方向准确率/收益率/分组统计 | 🔲 |
-| W6.2 | 价格回填脚本 | 从eastmoney回填当前价格到actual_6m | 🔲 |
-| W6.3 | 维度预测力分析 | 哪个维度评分高时信号更准？ | 🔲 |
-| W6.4 | `manage.py audit` 命令 | CLI入口 + 格式化报告 | 🔲 |
-| W6.5 | 周报集成 | 周报中显示准确率摘要 | 🔲 |
+| W6.1 | 准确率审计模块 | `src/analysis/accuracy_audit.py` — 方向准确率/收益率/分组统计 | ✅ |
+| W6.2 | 价格回填脚本 | 从eastmoney回填当前价格到actual_6m | ✅ |
+| W6.3 | 维度预测力分析 | 哪个维度评分高时信号更准？ | ✅ |
+| W6.4 | `manage.py audit` 命令 | CLI入口 + 格式化报告 | ✅ |
+| W6.5 | 周报集成 | 周报中显示准确率摘要 | ✅ |
 
-## 模块七：领先指标结构化追踪 ✅ 规划完成
+## 模块七：领先指标结构化追踪 ✅ 已完成 (2026-08-28)
 
 > **目标：** 将watchlist.md中15家公司的文本领先指标编码为可追踪结构
-> **详细计划：** [2026-08-28-three-pillars-plan.md](docs/plans/2026-08-28-three-pillars-plan.md)
 
 | # | 工作项 | 描述 | 状态 |
 |---|--------|------|------|
-| W7.1 | 领先指标数据模型 | `src/analysis/leading_indicators.py` + DuckDB表 | 🔲 |
-| W7.2 | 批量导入脚本 | 从watchlist.md提取15家公司~30条指标 | 🔲 |
-| W7.3 | `manage.py indicators` 命令 | 查看/更新指标状态 | 🔲 |
-| W7.4 | 周报集成 | 领先指标区块(含预警) | 🔲 |
+| W7.1 | 领先指标数据模型 | `src/analysis/leading_indicators.py` + DuckDB表 | ✅ |
+| W7.2 | 批量导入脚本 | 从watchlist.md提取13家公司23条指标 | ✅ |
+| W7.3 | `manage.py indicators` 命令 | 查看/更新指标状态 | ✅ |
+| W7.4 | 周报集成 | 领先指标区块(含预警) | ✅ |
 
-## 模块八：组合约束层 ✅ 规划完成
+## 模块八：组合约束层 ✅ 已完成 (2026-08-28)
 
 > **目标：** 在信号层面检查组合风险，防止过度集中
-> **详细计划：** [2026-08-28-three-pillars-plan.md](docs/plans/2026-08-28-three-pillars-plan.md)
 
 | # | 工作项 | 描述 | 状态 |
 |---|--------|------|------|
-| W8.1 | 约束检查模块 | `src/strategy/portfolio_constraints.py` | 🔲 |
-| W8.2 | 约束配置 | 单股/行业/市场/相关性组配置 | 🔲 |
-| W8.3 | `manage.py constraints` 命令 | CLI入口 | 🔲 |
-| W8.4 | 周报+仪表盘集成 | 约束检查结果写入周报和dashboard | 🔲 |
+| W8.1 | 约束检查模块 | `src/strategy/portfolio_constraints.py` | ✅ |
+| W8.2 | 约束配置 | 单股/行业/市场/相关性组配置 | ✅ |
+| W8.3 | `manage.py constraints` 命令 | CLI入口 | ✅ |
+| W8.4 | 周报+仪表盘集成 | 约束检查结果写入周报和dashboard | ✅ |
 
 ---
 
