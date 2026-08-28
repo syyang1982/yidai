@@ -5,6 +5,7 @@ import os
 import json
 from datetime import date, datetime, timedelta
 from unittest.mock import patch, MagicMock
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
@@ -106,7 +107,7 @@ _SIGNAL_COLS = [
     "analysis_details", "user_action", "user_shares", "user_price", "user_date",
     "user_reason", "prediction_6m", "prediction_12m", "actual_6m", "actual_12m",
     "prediction_accuracy", "lessons_learned", "system_improvement", "status",
-    "created_at", "updated_at",
+    "created_at", "updated_at", "time_window_prices",
 ]
 
 
@@ -139,6 +140,7 @@ def _make_row(**overrides):
         "status": "active_6m",
         "created_at": datetime.now(),
         "updated_at": datetime.now(),
+        "time_window_prices": None,
     }
     defaults.update(overrides)
     return tuple(defaults[c] for c in _SIGNAL_COLS)
@@ -154,7 +156,8 @@ class TestLoadPendingSignals:
         mock_conn.execute.return_value.fetchall.return_value = [row]
         mock_conn.execute.return_value.description = [(c,) for c in _SIGNAL_COLS]
 
-        auditor = AccuracyAuditor(db_path="/tmp/fake.duckdb")
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+        auditor.db_path = "/tmp/fake.duckdb"
         with patch("analysis.accuracy_audit.duckdb") as mock_duckdb:
             mock_duckdb.connect.return_value = mock_conn
             records = auditor.load_pending_signals()
@@ -185,7 +188,8 @@ class TestLoadPendingSignals:
         mock_conn.execute.return_value.fetchall.return_value = [row]
         mock_conn.execute.return_value.description = [(c,) for c in _SIGNAL_COLS]
 
-        auditor = AccuracyAuditor(db_path="/tmp/fake.duckdb")
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+        auditor.db_path = "/tmp/fake.duckdb"
         with patch("analysis.accuracy_audit.duckdb") as mock_duckdb:
             mock_duckdb.connect.return_value = mock_conn
             records = auditor.load_pending_signals()
@@ -202,7 +206,8 @@ class TestLoadPendingSignals:
         mock_conn.execute.return_value.fetchall.return_value = []
         mock_conn.execute.return_value.description = [(c,) for c in _SIGNAL_COLS]
 
-        auditor = AccuracyAuditor(db_path="/tmp/fake.duckdb")
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+        auditor.db_path = "/tmp/fake.duckdb"
         with patch("analysis.accuracy_audit.duckdb") as mock_duckdb:
             mock_duckdb.connect.return_value = mock_conn
             auditor.load_pending_signals(min_days_old=180)
@@ -218,7 +223,8 @@ class TestLoadPendingSignals:
         mock_conn.execute.return_value.fetchall.return_value = []
         mock_conn.execute.return_value.description = [(c,) for c in _SIGNAL_COLS]
 
-        auditor = AccuracyAuditor(db_path="/tmp/fake.duckdb")
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+        auditor.db_path = "/tmp/fake.duckdb"
         with patch("analysis.accuracy_audit.duckdb") as mock_duckdb:
             mock_duckdb.connect.return_value = mock_conn
             records = auditor.load_pending_signals()
@@ -231,7 +237,8 @@ class TestLoadPendingSignals:
         mock_conn.execute.return_value.fetchall.return_value = []
         mock_conn.execute.return_value.description = [(c,) for c in _SIGNAL_COLS]
 
-        auditor = AccuracyAuditor(db_path="/tmp/fake.duckdb")
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+        auditor.db_path = "/tmp/fake.duckdb"
         with patch("analysis.accuracy_audit.duckdb") as mock_duckdb:
             mock_duckdb.connect.return_value = mock_conn
             auditor.load_pending_signals()
@@ -240,11 +247,29 @@ class TestLoadPendingSignals:
             auditor.db_path, read_only=True
         )
 
+    def test_time_window_prices_parsed(self):
+        """time_window_prices JSON column should be parsed."""
+        twp_json = json.dumps({"30": {"target_date": "2026-06-27", "price": 25.0}})
+        row = _make_row(time_window_prices=twp_json)
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = [row]
+        mock_conn.execute.return_value.description = [(c,) for c in _SIGNAL_COLS]
+
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+        auditor.db_path = "/tmp/fake.duckdb"
+        with patch("analysis.accuracy_audit.duckdb") as mock_duckdb:
+            mock_duckdb.connect.return_value = mock_conn
+            records = auditor.load_pending_signals()
+
+        rec = records[0]
+        assert isinstance(rec["time_window_prices"], dict)
+        assert rec["time_window_prices"]["30"]["price"] == 25.0
+
 
 class TestComputeAccuracyStats:
     """compute_accuracy_stats: aggregate accuracy from records."""
 
-    def _make_record(self, signal_type, signal_price, current_price, grade="B", dimension_scores=None):
+    def _make_record(self, signal_type, signal_price, current_price, grade="B", dimension_scores=None, time_window_prices=None):
         """Helper to make a minimal record dict for compute_accuracy_stats."""
         rec = {
             "signal_type": signal_type,
@@ -254,6 +279,8 @@ class TestComputeAccuracyStats:
         }
         if dimension_scores is not None:
             rec["dimension_scores"] = dimension_scores
+        if time_window_prices is not None:
+            rec["time_window_prices"] = time_window_prices
         return rec
 
     def test_overall_accuracy(self):
@@ -373,6 +400,198 @@ class TestComputeAccuracyStats:
         assert buy["accuracy"] == 1.0
         assert abs(buy["avg_return"] - 0.15) < 1e-9  # avg of 0.10 and 0.20
 
+    def test_window_days_uses_time_window_price(self):
+        """window_days parameter uses price from time_window_prices."""
+        auditor = AccuracyAuditor()
+        records = [
+            self._make_record(
+                "BUY", 100, 110,  # current_price=110 (ignored when window_days=30)
+                time_window_prices={"30": {"target_date": "2026-06-27", "price": 120.0}},
+            ),
+            self._make_record(
+                "REDUCE", 100, 90,  # current_price=90 (ignored when window_days=30)
+                time_window_prices={"30": {"target_date": "2026-06-27", "price": 80.0}},
+            ),
+        ]
+        stats = auditor.compute_accuracy_stats(records, window_days=30)
+        # BUY: signal 100, window price 120 -> +20% -> correct
+        # REDUCE: signal 100, window price 80 -> -20% -> correct
+        assert stats["total"] == 2
+        assert stats["correct"] == 2
+        assert stats["direction_accuracy"] == 1.0
+
+    def test_window_days_skips_missing_window(self):
+        """Records without the requested window are skipped."""
+        auditor = AccuracyAuditor()
+        records = [
+            self._make_record(
+                "BUY", 100, 110,
+                time_window_prices={"30": {"target_date": "2026-06-27", "price": 120.0}},
+            ),
+            self._make_record(
+                "BUY", 100, 110,
+                time_window_prices={},  # no 30-day window
+            ),
+        ]
+        stats = auditor.compute_accuracy_stats(records, window_days=30)
+        assert stats["total"] == 1  # second record skipped
+        assert stats["correct"] == 1
+
+    def test_window_days_string_keys(self):
+        """time_window_prices with string keys works correctly."""
+        auditor = AccuracyAuditor()
+        records = [
+            self._make_record(
+                "BUY", 100, 110,
+                time_window_prices={"60": {"target_date": "2026-07-27", "price": 130.0}},
+            ),
+        ]
+        stats = auditor.compute_accuracy_stats(records, window_days=60)
+        assert stats["total"] == 1
+        assert stats["correct"] == 1
+
+
+class TestToYahooTicker:
+    """_to_yahoo_ticker: convert internal ticker to Yahoo Finance format."""
+
+    def test_hk_with_leading_zero(self):
+        auditor = AccuracyAuditor()
+        assert auditor._to_yahoo_ticker("01810.HK") == "1810.HK"
+
+    def test_hk_no_leading_zero(self):
+        auditor = AccuracyAuditor()
+        assert auditor._to_yahoo_ticker("9988.HK") == "9988.HK"
+
+    def test_hk_five_digit_numeric(self):
+        auditor = AccuracyAuditor()
+        assert auditor._to_yahoo_ticker("09698") == "9698.HK"
+
+    def test_a_share_shanghai(self):
+        auditor = AccuracyAuditor()
+        assert auditor._to_yahoo_ticker("600519.SS") == "600519.SS"
+
+    def test_a_share_shenzhen(self):
+        auditor = AccuracyAuditor()
+        assert auditor._to_yahoo_ticker("300750.SZ") == "300750.SZ"
+
+    def test_sh_to_ss(self):
+        auditor = AccuracyAuditor()
+        assert auditor._to_yahoo_ticker("600900.SH") == "600900.SS"
+
+    def test_us_stock(self):
+        auditor = AccuracyAuditor()
+        assert auditor._to_yahoo_ticker("LX") == "LX"
+
+    def test_numeric_6digit_6start(self):
+        auditor = AccuracyAuditor()
+        assert auditor._to_yahoo_ticker("601689") == "601689.SS"
+
+    def test_numeric_6digit_3start(self):
+        auditor = AccuracyAuditor()
+        assert auditor._to_yahoo_ticker("300602") == "300602.SZ"
+
+    def test_numeric_6digit_0start(self):
+        auditor = AccuracyAuditor()
+        assert auditor._to_yahoo_ticker("002415") == "002415.SZ"
+
+    def test_case_insensitive(self):
+        auditor = AccuracyAuditor()
+        assert auditor._to_yahoo_ticker("lx") == "LX"
+        assert auditor._to_yahoo_ticker("01810.hk") == "1810.HK"
+
+    def test_whitespace_stripped(self):
+        auditor = AccuracyAuditor()
+        assert auditor._to_yahoo_ticker("  LX  ") == "LX"
+
+    def test_unknown_format_returns_none(self):
+        auditor = AccuracyAuditor()
+        assert auditor._to_yahoo_ticker("ABC123") is None
+
+
+class TestFetchPriceAtDate:
+    """fetch_price_at_date: Yahoo Finance v8 chart API."""
+
+    def test_returns_price_on_success(self):
+        """Successful API response returns the closing price."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        # Timestamps for 2026-06-26, 2026-06-27, 2026-06-29
+        # Target is 2026-06-28, so closest is 2026-06-27 (1751001600) -> 25.0
+        # or 2026-06-29 (1751174400) -> 25.3. We need to compute real timestamps.
+        from datetime import datetime as dt
+        ts_26 = int(dt(2026, 6, 26).timestamp())
+        ts_27 = int(dt(2026, 6, 27).timestamp())
+        ts_29 = int(dt(2026, 6, 29).timestamp())
+        mock_response.json.return_value = {
+            "chart": {
+                "result": [{
+                    "timestamp": [ts_26, ts_27, ts_29],
+                    "indicators": {
+                        "quote": [{"close": [24.5, 25.0, 25.3]}]
+                    },
+                }]
+            }
+        }
+
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+        with patch("analysis.accuracy_audit.requests.get", return_value=mock_response):
+            price = auditor.fetch_price_at_date("01810.HK", "2026-06-28")
+
+        assert price is not None
+        # 2026-06-27 and 2026-06-29 are equidistant from 06-28;
+        # the algorithm picks whichever comes first with smallest diff
+        assert price in (25.0, 25.3)
+
+    def test_returns_none_on_api_failure(self):
+        """API failure returns None."""
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+        with patch("analysis.accuracy_audit.requests.get", side_effect=Exception("timeout")):
+            price = auditor.fetch_price_at_date("01810.HK", "2026-06-28")
+
+        assert price is None
+
+    def test_returns_none_for_invalid_ticker(self):
+        """Invalid ticker format returns None."""
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+        price = auditor.fetch_price_at_date("INVALID123", "2026-06-28")
+        assert price is None
+
+    def test_returns_none_for_empty_result(self):
+        """Empty chart result returns None."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {"chart": {"result": []}}
+
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+        with patch("analysis.accuracy_audit.requests.get", return_value=mock_response):
+            price = auditor.fetch_price_at_date("LX", "2026-06-28")
+
+        assert price is None
+
+    def test_handles_none_close_values(self):
+        """Skips None close prices and finds the nearest valid one."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "chart": {
+                "result": [{
+                    "timestamp": [1719532800, 1719619200],
+                    "indicators": {
+                        "quote": [{"close": [None, 25.0]}]
+                    },
+                }]
+            }
+        }
+
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+        with patch("analysis.accuracy_audit.requests.get", return_value=mock_response):
+            price = auditor.fetch_price_at_date("01810.HK", "2026-06-28")
+
+        assert price == 25.0
+
 
 class TestBackfillPrices:
     """backfill_prices method tests."""
@@ -409,7 +628,8 @@ class TestBackfillPrices:
         conn.close()
 
         from src.analysis.accuracy_audit import AccuracyAuditor
-        auditor = AccuracyAuditor(db_path=db_path)
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+        auditor.db_path = db_path
 
         class MockFetcher:
             def _detect_market(self, ticker):
@@ -460,7 +680,8 @@ class TestBackfillPrices:
         conn.close()
 
         from src.analysis.accuracy_audit import AccuracyAuditor
-        auditor = AccuracyAuditor(db_path=db_path)
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+        auditor.db_path = db_path
 
         class MockFetcher:
             def _detect_market(self, ticker):
@@ -472,12 +693,154 @@ class TestBackfillPrices:
         assert updated == 0  # already has actual_6m
 
 
+class TestBackfillTimeWindows:
+    """backfill_time_windows method tests."""
+
+    def test_backfill_time_windows_basic(self, tmp_path):
+        """Backfill time window prices for signals."""
+        import duckdb as ddb
+        db_path = str(tmp_path / "test.duckdb")
+        conn = ddb.connect(db_path)
+        conn.execute("""
+            CREATE TABLE signal_records (
+                signal_id VARCHAR, ticker VARCHAR, company_name VARCHAR,
+                signal_date DATE, signal_type VARCHAR, signal_source VARCHAR,
+                company_state JSON, dimension_scores JSON,
+                total_score INTEGER, grade VARCHAR, analysis_details JSON,
+                user_action VARCHAR, user_shares INTEGER, user_price DOUBLE,
+                user_date DATE, user_reason VARCHAR,
+                prediction_6m JSON, prediction_12m JSON,
+                actual_6m JSON, actual_12m JSON,
+                prediction_accuracy JSON, lessons_learned VARCHAR,
+                system_improvement VARCHAR, status VARCHAR,
+                created_at TIMESTAMP, updated_at TIMESTAMP,
+                time_window_prices JSON
+            )
+        """)
+        # Signal from 90+ days ago so 30-day window is in the past
+        sig_date = (date.today() - timedelta(days=120)).isoformat()
+        conn.execute(f"""
+            INSERT INTO signal_records VALUES (
+                't1', '01810.HK', '小米', '{sig_date}', 'BUY', '七维评分',
+                '{{"price": 20.0}}', '{{}}', 32, 'A', '{{}}',
+                '', 0, 0, NULL, NULL,
+                '{{"expected_price": 22.0}}', NULL, NULL, NULL,
+                NULL, '', '', 'active_6m', '{sig_date}', '{sig_date}',
+                NULL
+            )
+        """)
+        conn.close()
+
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+        auditor.db_path = Path(db_path)
+
+        with patch.object(auditor, "fetch_price_at_date", return_value=25.0):
+            result = auditor.backfill_time_windows([30, 60])
+
+        assert result["total_signals"] == 1
+        assert result["updated"] == 1
+        assert result["by_window"][30]["fetched"] == 1
+        assert result["by_window"][60]["fetched"] == 1
+
+        # Verify DB was updated
+        conn = ddb.connect(db_path, read_only=True)
+        row = conn.execute(
+            "SELECT time_window_prices FROM signal_records WHERE signal_id='t1'"
+        ).fetchone()
+        conn.close()
+        twp = json.loads(row[0])
+        assert "30" in twp
+        assert twp["30"]["price"] == 25.0
+
+    def test_backfill_skips_no_price(self, tmp_path):
+        """Signals without signal_price are skipped."""
+        import duckdb as ddb
+        db_path = str(tmp_path / "test.duckdb")
+        conn = ddb.connect(db_path)
+        conn.execute("""
+            CREATE TABLE signal_records (
+                signal_id VARCHAR, ticker VARCHAR, company_name VARCHAR,
+                signal_date DATE, signal_type VARCHAR, signal_source VARCHAR,
+                company_state JSON, dimension_scores JSON,
+                total_score INTEGER, grade VARCHAR, analysis_details JSON,
+                user_action VARCHAR, user_shares INTEGER, user_price DOUBLE,
+                user_date DATE, user_reason VARCHAR,
+                prediction_6m JSON, prediction_12m JSON,
+                actual_6m JSON, actual_12m JSON,
+                prediction_accuracy JSON, lessons_learned VARCHAR,
+                system_improvement VARCHAR, status VARCHAR,
+                created_at TIMESTAMP, updated_at TIMESTAMP,
+                time_window_prices JSON
+            )
+        """)
+        sig_date = (date.today() - timedelta(days=120)).isoformat()
+        conn.execute(f"""
+            INSERT INTO signal_records VALUES (
+                't1', '01810.HK', '小米', '{sig_date}', 'BUY', '七维评分',
+                NULL, NULL, 32, 'A', NULL,
+                '', 0, 0, NULL, NULL,
+                NULL, NULL, NULL, NULL,
+                NULL, '', '', 'active_6m', '{sig_date}', '{sig_date}',
+                NULL
+            )
+        """)
+        conn.close()
+
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+        auditor.db_path = Path(db_path)
+
+        result = auditor.backfill_time_windows([30])
+        assert result["skipped"] == 1
+        assert result["updated"] == 0
+
+    def test_too_recent_windows_counted(self, tmp_path):
+        """Windows in the future are counted as too_recent."""
+        import duckdb as ddb
+        db_path = str(tmp_path / "test.duckdb")
+        conn = ddb.connect(db_path)
+        conn.execute("""
+            CREATE TABLE signal_records (
+                signal_id VARCHAR, ticker VARCHAR, company_name VARCHAR,
+                signal_date DATE, signal_type VARCHAR, signal_source VARCHAR,
+                company_state JSON, dimension_scores JSON,
+                total_score INTEGER, grade VARCHAR, analysis_details JSON,
+                user_action VARCHAR, user_shares INTEGER, user_price DOUBLE,
+                user_date DATE, user_reason VARCHAR,
+                prediction_6m JSON, prediction_12m JSON,
+                actual_6m JSON, actual_12m JSON,
+                prediction_accuracy JSON, lessons_learned VARCHAR,
+                system_improvement VARCHAR, status VARCHAR,
+                created_at TIMESTAMP, updated_at TIMESTAMP,
+                time_window_prices JSON
+            )
+        """)
+        # Signal from 10 days ago: 30-day window is still in the future
+        sig_date = (date.today() - timedelta(days=10)).isoformat()
+        conn.execute(f"""
+            INSERT INTO signal_records VALUES (
+                't1', '01810.HK', '小米', '{sig_date}', 'BUY', '七维评分',
+                '{{"price": 20.0}}', '{{}}', 32, 'A', '{{}}',
+                '', 0, 0, NULL, NULL,
+                '{{"expected_price": 22.0}}', NULL, NULL, NULL,
+                NULL, '', '', 'active_6m', '{sig_date}', '{sig_date}',
+                NULL
+            )
+        """)
+        conn.close()
+
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+        auditor.db_path = Path(db_path)
+
+        result = auditor.backfill_time_windows([30, 180])
+        assert result["by_window"][30]["too_recent"] == 1
+        assert result["by_window"][180]["too_recent"] == 1
+
+
 class TestFormatReport:
     """format_report method tests."""
 
     def test_contains_key_sections(self):
         """报告应包含关键区块"""
-        from src.analysis.accuracy_audit import AccuracyAuditor
         auditor = AccuracyAuditor.__new__(AccuracyAuditor)
 
         stats = {
@@ -506,3 +869,83 @@ class TestFormatReport:
         assert "维度预测力" in report
         assert "BUY" in report
         assert "65.0%" in report
+
+    def test_multi_window_report(self):
+        """Multi-window report contains all expected sections."""
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+
+        result = {
+            "windows": {
+                30: {
+                    "total": 10, "correct": 7,
+                    "direction_accuracy": 0.70,
+                    "avg_return_pct": 0.05,
+                    "by_type": {
+                        "BUY": {"total": 5, "correct": 4, "accuracy": 0.80, "avg_return": 0.08},
+                    },
+                    "by_grade": {},
+                    "by_dimension": {},
+                },
+                90: {
+                    "total": 8, "correct": 5,
+                    "direction_accuracy": 0.625,
+                    "avg_return_pct": 0.03,
+                    "by_type": {},
+                    "by_grade": {},
+                    "by_dimension": {},
+                },
+            },
+            "overall": {
+                "total": 15, "correct": 10,
+                "direction_accuracy": 0.667,
+                "avg_return_pct": 0.04,
+                "by_type": {
+                    "BUY": {"total": 8, "correct": 6, "accuracy": 0.75, "avg_return": 0.06},
+                    "HOLD": {"total": 7, "correct": 4, "accuracy": 0.57, "avg_return": 0.02},
+                },
+                "by_grade": {},
+                "by_dimension": {},
+            },
+        }
+
+        report = auditor.format_report(result)
+        assert "固定时间窗口" in report
+        assert "30天窗口" in report
+        assert "90天窗口" in report
+        assert "70.0%" in report
+        assert "62.5%" in report
+        assert "总体(最新价格)" in report
+        assert "66.7%" in report
+
+    def test_multi_window_with_dimensions(self):
+        """Multi-window report shows dimension analysis from longest window."""
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+
+        result = {
+            "windows": {
+                90: {
+                    "total": 10, "correct": 7,
+                    "direction_accuracy": 0.70,
+                    "avg_return_pct": 0.05,
+                    "by_type": {},
+                    "by_grade": {},
+                    "by_dimension": {
+                        "盈利": {
+                            "high_score_accuracy": 0.80,
+                            "low_score_accuracy": 0.50,
+                            "predictive_power": 0.30,
+                            "high_count": 5,
+                            "low_count": 5,
+                        },
+                    },
+                },
+            },
+            "overall": {"total": 0, "correct": 0, "direction_accuracy": 0,
+                        "avg_return_pct": 0, "by_type": {}, "by_grade": {}, "by_dimension": {}},
+        }
+
+        report = auditor.format_report(result)
+        assert "维度预测力" in report
+        assert "90天窗口" in report
+        assert "盈利" in report
+        assert "+0.30" in report

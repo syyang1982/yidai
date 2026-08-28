@@ -398,13 +398,19 @@ class TestGenerateFullReport:
         """)
         conn.close()
 
-        auditor = AccuracyAuditor(db_path=db_path)
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+        auditor.db_path = db_path
+        # Skip _ensure_time_window_column since table has no time_window_prices col
         stats = auditor.generate_full_report()
 
+        # generate_full_report now returns {"windows": {...}, "overall": {...}}
+        assert "overall" in stats
+        assert "windows" in stats
+        overall = stats["overall"]
         # test-001 has actual_6m -> current_price=380.0 -> BUY at 350->380 = correct
-        assert stats["total"] == 1
-        assert stats["correct"] == 1
-        assert stats["direction_accuracy"] == 1.0
+        assert overall["total"] == 1
+        assert overall["correct"] == 1
+        assert overall["direction_accuracy"] == 1.0
 
     def test_empty_db(self, tmp_path):
 
@@ -428,7 +434,9 @@ class TestGenerateFullReport:
         """)
         conn.close()
 
-        auditor = AccuracyAuditor(db_path=db_path)
+        auditor = AccuracyAuditor.__new__(AccuracyAuditor)
+        auditor.db_path = db_path
         stats = auditor.generate_full_report()
 
-        assert stats["total"] == 0
+        assert "overall" in stats
+        assert stats["overall"]["total"] == 0
