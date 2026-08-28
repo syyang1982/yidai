@@ -1297,7 +1297,14 @@ def cmd_audit(args):
         limit = getattr(args, 'limit', 200)
         print("📊 回填信号价格...")
         updated = auditor.backfill_prices(max_records=limit)
-        print(f"  ✅ 回填 {updated} 条记录\n")
+
+    if getattr(args, "windows", False):
+        print("📊 回填时间窗口价格 (30/60/90/180天)...")
+        result = auditor.backfill_time_windows([30, 60, 90, 180])
+        print(f'  ✅ 更新 {result["updated"]} 条记录')
+        for w, info in result["by_window"].items():
+            print(f"    {w}天: {info["fetched"]}条已获取, {info["too_recent"]}条太新跳过")
+        print()
 
     stats = auditor.generate_full_report()
     if not stats.get("windows") and stats.get("overall", {}).get("total", 0) == 0:
@@ -1506,6 +1513,7 @@ def main():
     p_audit = subparsers.add_parser("audit", help="信号准确率审计")
     p_audit.add_argument("--backfill", action="store_true", help="先回填当前价格")
     p_audit.add_argument("--limit", type=int, default=200, help="回填数量限制")
+    p_audit.add_argument("--windows", action="store_true", help="回填时间窗口价格(30/60/90/180天)")
 
     # indicators
     p_indicators = subparsers.add_parser("indicators", help="领先指标管理")
