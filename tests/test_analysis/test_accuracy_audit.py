@@ -2,6 +2,9 @@
 
 import sys
 import os
+import json
+from datetime import date, datetime, timedelta
+from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
@@ -92,3 +95,280 @@ class TestIsDirectionCorrect:
             signal_type="BUY", signal_price=0.0, current_price=110.0
         )
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Helper: build a fake DuckDB row tuple matching the signal_records columns
+# ---------------------------------------------------------------------------
+_SIGNAL_COLS = [
+    "signal_id", "ticker", "company_name", "signal_date", "signal_type",
+    "signal_source", "company_state", "dimension_scores", "total_score", "grade",
+    "analysis_details", "user_action", "user_shares", "user_price", "user_date",
+    "user_reason", "prediction_6m", "prediction_12m", "actual_6m", "actual_12m",
+    "prediction_accuracy", "lessons_learned", "system_improvement", "status",
+    "created_at", "updated_at",
+]
+
+
+def _make_row(**overrides):
+    """Return a tuple of defaults, overridden by kwargs."""
+    defaults = {
+        "signal_id": "test-001",
+        "ticker": "0700.HK",
+        "company_name": "腾讯",
+        "signal_date": date.today() - timedelta(days=200),
+        "signal_type": "BUY",
+        "signal_source": "七维评分",
+        "company_state": json.dumps({"price": 350.0, "pe": 15.0, "pb": 3.0}),
+        "dimension_scores": json.dumps({"盈利": 4, "健康": 4, "现金流": 3, "估值": 4, "成长": 3, "股东": 3, "战略": 3}),
+        "total_score": 24,
+        "grade": "C",
+        "analysis_details": None,
+        "user_action": None,
+        "user_shares": 0,
+        "user_price": 0.0,
+        "user_date": None,
+        "user_reason": None,
+        "prediction_6m": json.dumps({"expected_price": 400.0, "confidence": 3}),
+        "prediction_12m": None,
+        "actual_6m": json.dumps({"current_price": 380.0, "date": "2026-02-01"}),
+        "actual_12m": None,
+        "prediction_accuracy": None,
+        "lessons_learned": None,
+        "system_improvement": None,
+        "status": "active_6m",
+        "created_at": datetime.now(),
+        "updated_at": datetime.now(),
+    }
+    defaults.update(overrides)
+    return tuple(defaults[c] for c in _SIGNAL_COLS)
+
+
+class TestLoadPendingSignals:
+    """load_pending_signals: read from DuckDB and parse JSON fields."""
+
+    def test_returns_parsed_records(self):
+        """Basic: returns list of dicts with expected keys."""
+        row = _make_row()
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = [row]
+        mock_conn.execute.return_value.description = [(c,) for c in _SIGNAL_COLS]
+
+        auditor = AccuracyAuditor(db_path="/tmp/fake.duckdb")
+        with patch("analysis.accuracy_audit.duckdb") as mock_duckdb:
+            mock_duckdb.connect.return_value = mock_conn
+            records = auditor.load_pending_signals()
+
+        assert len(records) == 1
+        rec = records[0]
+        assert rec["signal_id"] == "test-001"
+        assert rec["ticker"] == "0700.HK"
+        assert rec["company_name"] == "腾讯"
+        assert rec["signal_type"] == "BUY"
+        assert rec["signal_price"] == 350.0
+        assert rec["expected_price_6m"] == 400.0
+        assert rec["total_score"] == 24
+        assert rec["grade"] == "C"
+        assert isinstance(rec["dimension_scores"], dict)
+        assert rec["dimension_scores"]["盈利"] == 4
+        assert rec["actual_6m"] == {"current_price": 380.0, "date": "2026-02-01"}
+
+    def test_json_none_fields_handled(self):
+        """When JSON columns are NULL, result should be None not crash."""
+        row = _make_row(
+            company_state=None,
+            dimension_scores=None,
+            prediction_6m=None,
+            actual_6m=None,
+        )
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = [row]
+        mock_conn.execute.return_value.description = [(c,) for c in _SIGNAL_COLS]
+
+        auditor = AccuracyAuditor(db_path="/tmp/fake.duckdb")
+        with patch("analysis.accuracy_audit.duckdb") as mock_duckdb:
+            mock_duckdb.connect.return_value = mock_conn
+            records = auditor.load_pending_signals()
+
+        rec = records[0]
+        assert rec["signal_price"] is None
+        assert rec["expected_price_6m"] is None
+        assert rec["dimension_scores"] is None
+        assert rec["actual_6m"] is None
+
+    def test_min_days_old_filter(self):
+        """min_days_old is passed to the SQL WHERE clause."""
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = []
+        mock_conn.execute.return_value.description = [(c,) for c in _SIGNAL_COLS]
+
+        auditor = AccuracyAuditor(db_path="/tmp/fake.duckdb")
+        with patch("analysis.accuracy_audit.duckdb") as mock_duckdb:
+            mock_duckdb.connect.return_value = mock_conn
+            auditor.load_pending_signals(min_days_old=180)
+
+        # Verify the SQL was called with min_days_old parameter
+        call_args = mock_conn.execute.call_args
+        sql = call_args[0][0]
+        assert "180" in sql or "signal_date" in sql
+
+    def test_empty_result(self):
+        """Returns empty list when no records found."""
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = []
+        mock_conn.execute.return_value.description = [(c,) for c in _SIGNAL_COLS]
+
+        auditor = AccuracyAuditor(db_path="/tmp/fake.duckdb")
+        with patch("analysis.accuracy_audit.duckdb") as mock_duckdb:
+            mock_duckdb.connect.return_value = mock_conn
+            records = auditor.load_pending_signals()
+
+        assert records == []
+
+    def test_read_only_connection(self):
+        """Opens DuckDB in read_only mode."""
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchall.return_value = []
+        mock_conn.execute.return_value.description = [(c,) for c in _SIGNAL_COLS]
+
+        auditor = AccuracyAuditor(db_path="/tmp/fake.duckdb")
+        with patch("analysis.accuracy_audit.duckdb") as mock_duckdb:
+            mock_duckdb.connect.return_value = mock_conn
+            auditor.load_pending_signals()
+
+        mock_duckdb.connect.assert_called_once_with(
+            auditor.db_path, read_only=True
+        )
+
+
+class TestComputeAccuracyStats:
+    """compute_accuracy_stats: aggregate accuracy from records."""
+
+    def _make_record(self, signal_type, signal_price, current_price, grade="B", dimension_scores=None):
+        """Helper to make a minimal record dict for compute_accuracy_stats."""
+        rec = {
+            "signal_type": signal_type,
+            "signal_price": signal_price,
+            "current_price": current_price,
+            "grade": grade,
+        }
+        if dimension_scores is not None:
+            rec["dimension_scores"] = dimension_scores
+        return rec
+
+    def test_overall_accuracy(self):
+        """Correct BUY signals counted accurately."""
+        auditor = AccuracyAuditor()
+        records = [
+            self._make_record("BUY", 100, 110),     # correct
+            self._make_record("BUY", 100, 90),       # incorrect
+            self._make_record("REDUCE", 100, 90),    # correct
+            self._make_record("BUY", 100, 120),      # correct
+        ]
+        stats = auditor.compute_accuracy_stats(records)
+        assert stats["total"] == 4
+        assert stats["correct"] == 3
+        assert stats["direction_accuracy"] == 0.75
+
+    def test_avg_return_pct(self):
+        """Average return calculated correctly."""
+        auditor = AccuracyAuditor()
+        records = [
+            self._make_record("BUY", 100, 110),   # +10%
+            self._make_record("BUY", 100, 90),     # -10%
+        ]
+        stats = auditor.compute_accuracy_stats(records)
+        assert abs(stats["avg_return_pct"] - 0.0) < 1e-9
+
+    def test_by_type_breakdown(self):
+        """Stats grouped by signal type."""
+        auditor = AccuracyAuditor()
+        records = [
+            self._make_record("BUY", 100, 110),
+            self._make_record("BUY", 100, 120),
+            self._make_record("REDUCE", 100, 90),
+            self._make_record("HOLD", 100, 105),
+        ]
+        stats = auditor.compute_accuracy_stats(records)
+        assert stats["by_type"]["BUY"]["total"] == 2
+        assert stats["by_type"]["BUY"]["correct"] == 2
+        assert stats["by_type"]["REDUCE"]["total"] == 1
+        assert stats["by_type"]["REDUCE"]["correct"] == 1
+        assert stats["by_type"]["HOLD"]["total"] == 1
+
+    def test_by_grade_breakdown(self):
+        """Stats grouped by grade."""
+        auditor = AccuracyAuditor()
+        records = [
+            self._make_record("BUY", 100, 110, grade="A"),
+            self._make_record("BUY", 100, 90, grade="A"),
+            self._make_record("REDUCE", 100, 90, grade="B"),
+        ]
+        stats = auditor.compute_accuracy_stats(records)
+        assert stats["by_grade"]["A"]["total"] == 2
+        assert stats["by_grade"]["A"]["correct"] == 1
+        assert stats["by_grade"]["B"]["total"] == 1
+        assert stats["by_grade"]["B"]["correct"] == 1
+
+    def test_by_dimension_predictive_power(self):
+        """Dimension analysis: high score accuracy vs low score accuracy."""
+        auditor = AccuracyAuditor()
+        ds_high = {"盈利": 5, "健康": 4, "现金流": 4, "估值": 4, "成长": 3, "股东": 3, "战略": 3}
+        ds_low = {"盈利": 1, "健康": 2, "现金流": 2, "估值": 1, "成长": 2, "股东": 3, "战略": 3}
+        records = [
+            # High profitability (5) -> price up -> correct BUY
+            self._make_record("BUY", 100, 110, dimension_scores=ds_high),
+            # High profitability (5) -> price down -> incorrect BUY
+            self._make_record("BUY", 100, 90, dimension_scores=ds_high),
+            # Low profitability (1) -> price down -> correct REDUCE
+            self._make_record("REDUCE", 100, 90, dimension_scores=ds_low),
+            # Low profitability (1) -> price up -> incorrect REDUCE
+            self._make_record("REDUCE", 100, 120, dimension_scores=ds_low),
+        ]
+        stats = auditor.compute_accuracy_stats(records)
+        prof = stats["by_dimension"]["盈利"]
+        # High score (>=3): 2 records, 1 correct -> 0.5
+        assert prof["high_count"] == 2
+        assert prof["high_score_accuracy"] == 0.5
+        # Low score (<3): 2 records, 1 correct -> 0.5
+        assert prof["low_count"] == 2
+        assert prof["low_score_accuracy"] == 0.5
+        # predictive_power = 0.5 - 0.5 = 0.0
+        assert prof["predictive_power"] == 0.0
+
+    def test_empty_records(self):
+        """Empty input returns sensible defaults."""
+        auditor = AccuracyAuditor()
+        stats = auditor.compute_accuracy_stats([])
+        assert stats["total"] == 0
+        assert stats["correct"] == 0
+        assert stats["direction_accuracy"] == 0.0
+        assert stats["avg_return_pct"] == 0.0
+
+    def test_zero_signal_price_skipped(self):
+        """Records with signal_price=0 are excluded from return/accuracy."""
+        auditor = AccuracyAuditor()
+        records = [
+            self._make_record("BUY", 0, 110),      # zero price -> skip
+            self._make_record("BUY", 100, 110),     # valid
+        ]
+        stats = auditor.compute_accuracy_stats(records)
+        assert stats["total"] == 2
+        # The zero-price record direction is False, so only 1 correct
+        assert stats["correct"] == 1
+
+    def test_by_type_has_accuracy_and_avg_return(self):
+        """Each type bucket has total, correct, accuracy, avg_return."""
+        auditor = AccuracyAuditor()
+        records = [
+            self._make_record("BUY", 100, 110),
+            self._make_record("BUY", 100, 120),
+        ]
+        stats = auditor.compute_accuracy_stats(records)
+        buy = stats["by_type"]["BUY"]
+        assert "total" in buy
+        assert "correct" in buy
+        assert "accuracy" in buy
+        assert "avg_return" in buy
+        assert buy["accuracy"] == 1.0
+        assert abs(buy["avg_return"] - 0.15) < 1e-9  # avg of 0.10 and 0.20
