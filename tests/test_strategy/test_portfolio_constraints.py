@@ -11,11 +11,12 @@ class TestPositionLimits:
         pc = PortfolioConstraints(max_single_pct=25)
         holdings = [
             {"ticker": "0005.HK", "name": "汇丰控股", "value_hkd": 300_000},
-            {"ticker": "0388.HK", "name": "港交所", "value_hkd": 200_000},
-            {"ticker": "0001.HK", "name": "长和", "value_hkd": 100_000},
+            {"ticker": "0388.HK", "name": "港交所", "value_hkd": 150_000},
+            {"ticker": "0001.HK", "name": "长和", "value_hkd": 150_000},
         ]
         violations = pc.check_position_limits(holdings)
         # 0005.HK = 300k / 600k = 50% > 25% → should be flagged
+        # 0388.HK = 150k / 600k = 25% → not over (boundary)
         assert len(violations) == 1
         assert violations[0]["ticker"] == "0005.HK"
         assert violations[0]["pct"] == pytest.approx(50.0)

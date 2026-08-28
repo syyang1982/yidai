@@ -55,7 +55,7 @@ class PortfolioConstraints:
                 violations.append({
                     "ticker": h["ticker"],
                     "name": h.get("name", ""),
-                    "pct": round(pct, 2),
+                    "pct": pct,
                     "limit": self.max_single_pct,
                     "value_hkd": h["value_hkd"],
                 })
@@ -74,7 +74,7 @@ class PortfolioConstraints:
             if pct > self.max_sector_pct:
                 violations.append({
                     "sector": sector,
-                    "pct": round(pct, 2),
+                    "pct": pct,
                     "limit": self.max_sector_pct,
                     "value_hkd": value,
                 })
@@ -93,7 +93,7 @@ class PortfolioConstraints:
             if pct > self.max_market_pct:
                 violations.append({
                     "market": market,
-                    "pct": round(pct, 2),
+                    "pct": pct,
                     "limit": self.max_market_pct,
                     "value_hkd": value,
                 })
@@ -114,7 +114,7 @@ class PortfolioConstraints:
                 violations.append({
                     "group": group["name"],
                     "reason": group["reason"],
-                    "pct": round(pct, 2),
+                    "pct": pct,
                     "limit": self.max_correlation_group_pct,
                     "value_hkd": group_value,
                 })
