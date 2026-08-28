@@ -1287,6 +1287,92 @@ def cmd_dividend(args):
                 )
 
 
+def cmd_audit(args):
+    """信号准确率审计。"""
+    from src.analysis.accuracy_audit import AccuracyAuditor
+
+    auditor = AccuracyAuditor()
+
+    if getattr(args, 'backfill', False):
+        limit = getattr(args, 'limit', 200)
+        print("📊 回填信号价格...")
+        updated = auditor.backfill_prices(max_records=limit)
+        print(f"  ✅ 回填 {updated} 条记录\n")
+
+    stats = auditor.generate_full_report()
+    if stats.get("total", 0) == 0:
+        print("暂无已回填的信号数据。请先运行: python manage.py audit --backfill")
+        return
+    print(auditor.format_report(stats))
+
+
+def cmd_indicators(args):
+    """领先指标管理。"""
+    from src.analysis.leading_indicators import LeadingIndicatorStore
+
+    db_path = os.path.join(PROJECT_ROOT, "db", "yidai.duckdb")
+    store = LeadingIndicatorStore(db_path)
+
+    ticker = getattr(args, 'ticker', None)
+    if ticker:
+        indicators = store.get_indicators(ticker)
+    else:
+        indicators = store.get_indicators()
+
+    if not indicators:
+        print("暂无领先指标数据。请运行: python scripts/import_leading_indicators.py")
+        return
+
+    # 格式化输出
+    print(f"\n{'='*65}")
+    print(f"  📡 领先指标追踪 ({len(indicators)} 条)")
+    print(f"{'='*65}\n")
+
+    # 按公司分组
+    by_company = {}
+    for ind in indicators:
+        key = ind.get("ticker", "?")
+        if key not in by_company:
+            by_company[key] = ind.get("company_name", key)
+
+    for t, name in by_company.items():
+        company_inds = [i for i in indicators if i.get("ticker") == t]
+        print(f"  {name} ({t})")
+        for ind in company_inds:
+            status = ind.get("status", "unknown")
+            icon = {"positive": "🟢", "negative": "🔴", "neutral": "🟡"}.get(status, "❓")
+            val = ind.get("latest_value")
+            val_str = f"{val}{ind.get('unit','')}" if val is not None else "—"
+            tp = ind.get("threshold_positive")
+            tn = ind.get("threshold_negative")
+            threshold = ""
+            if tp and tn:
+                threshold = f" ({tn}-{tp})"
+            elif tp:
+                threshold = f" (≥{tp})"
+            elif tn:
+                threshold = f" (≤{tn})"
+            print(f"    {icon} {ind['indicator_name']}: {val_str}{threshold}")
+        print()
+
+    # 显示预警
+    alerts = store.get_alerts()
+    if alerts:
+        print(f"  ⚠️ 预警 ({len(alerts)} 条):")
+        for a in alerts:
+            print(f"    {a['message']}")
+
+
+def cmd_constraints(args):
+    """组合约束检查。"""
+    from src.strategy.portfolio_config import get_default_constraints, create_sample_holdings
+
+    pc = get_default_constraints()
+    holdings = create_sample_holdings()
+    result = pc.check_all(holdings)
+    print(pc.format_report(result))
+
+
 def main():
     """Entry point for the YiDai investment analysis CLI."""
     parser = argparse.ArgumentParser(
@@ -1307,6 +1393,9 @@ def main():
   python manage.py kb                     知识库概览
   python manage.py kb 01810.HK            查看公司档案
   python manage.py test                   运行测试
+  python manage.py audit --backfill       信号准确率审计
+  python manage.py indicators             领先指标追踪
+  python manage.py constraints            组合约束检查
         """,
     )
 
@@ -1413,6 +1502,18 @@ def main():
     p_dividend.add_argument("--type", default="final", help="类型 (final/interim/special)")
     p_dividend.add_argument("--note", help="备注")
 
+    # audit
+    p_audit = subparsers.add_parser("audit", help="信号准确率审计")
+    p_audit.add_argument("--backfill", action="store_true", help="先回填当前价格")
+    p_audit.add_argument("--limit", type=int, default=200, help="回填数量限制")
+
+    # indicators
+    p_indicators = subparsers.add_parser("indicators", help="领先指标管理")
+    p_indicators.add_argument("ticker", nargs="?", help="按股票过滤")
+
+    # constraints
+    subparsers.add_parser("constraints", help="组合约束检查")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1434,6 +1535,9 @@ def main():
         "anomaly": cmd_anomaly,
         "dividend": cmd_dividend,
         "events": cmd_events,
+        "audit": cmd_audit,
+        "indicators": cmd_indicators,
+        "constraints": cmd_constraints,
     }
 
     func = commands.get(args.command)

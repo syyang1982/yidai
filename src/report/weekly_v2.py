@@ -636,6 +636,26 @@ def generate_report_v2(
         report_lines.append("---")
         report_lines.append("")
 
+    # 2.7 Accuracy audit summary
+    try:
+        from src.analysis.accuracy_audit import AccuracyAuditor
+        auditor = AccuracyAuditor(db_path=signal_db_path)
+        acc_stats = auditor.generate_full_report()
+        if acc_stats.get("total", 0) > 0:
+            acc = acc_stats["direction_accuracy"] * 100
+            report_lines.append(f"# 📈 信号准确率: {acc:.1f}% ({acc_stats['correct']}/{acc_stats['total']})")
+            report_lines.append("")
+            # Per-type summary
+            for sig_type in ["BUY", "HOLD", "REDUCE"]:
+                bt = acc_stats.get("by_type", {}).get(sig_type)
+                if bt:
+                    report_lines.append(f"- {sig_type}: {bt['accuracy']*100:.0f}% ({bt['correct']}/{bt['total']}) 均收益{bt['avg_return']*100:+.1f}%")
+            report_lines.append("")
+            report_lines.append("---")
+            report_lines.append("")
+    except Exception:
+        pass  # Skip if audit data unavailable
+
     # 2.5 Anomaly alerts (only if there are any)
     anomaly_text = _render_anomaly_alerts(all_anomaly_alerts)
     if anomaly_text:
@@ -658,10 +678,53 @@ def generate_report_v2(
     kb_text = _render_kb_insights(kb, signal_tracker)
     report_lines.append(kb_text)
 
+    # 5.5 Leading indicators
+    try:
+        from src.analysis.leading_indicators import LeadingIndicatorStore
+        li_store = LeadingIndicatorStore(db_path)
+        li_indicators = li_store.get_indicators()
+        li_alerts = li_store.get_alerts()
+        if li_indicators:
+            report_lines.append("# 📡 领先指标")
+            report_lines.append("")
+            negative_alerts = [a for a in li_alerts if a.get("type") == "negative"]
+            if negative_alerts:
+                report_lines.append("## ⚠️ 预警")
+                for a in negative_alerts:
+                    report_lines.append(f"- 🔴 {a['message']}")
+                report_lines.append("")
+            no_data = [a for a in li_alerts if a.get("type") == "no_data"]
+            if no_data:
+                report_lines.append("## ❓ 待更新")
+                for a in no_data[:5]:
+                    report_lines.append(f"- {a['message']}")
+                report_lines.append("")
+            report_lines.append("---")
+            report_lines.append("")
+    except Exception:
+        pass
+
     # 6. Action items
     pending_total = len(pending_6m) + len(pending_12m)
     action_text = _render_action_items(pending_total, deteriorating, near_boundary)
     report_lines.append(action_text)
+
+    # 6.5 Portfolio constraints
+    try:
+        from src.strategy.portfolio_config import get_default_constraints, create_sample_holdings
+        pc = get_default_constraints()
+        holdings = create_sample_holdings()
+        constraint_result = pc.check_all(holdings)
+        if constraint_result.get("has_violations"):
+            report_lines.append("# 🛡️ 组合约束预警")
+            report_lines.append("")
+            for v in constraint_result["violations"]:
+                report_lines.append(f"- ⚠️ {v['message']}")
+            report_lines.append("")
+            report_lines.append("---")
+            report_lines.append("")
+    except Exception:
+        pass
 
     # 7. Disclaimer
     report_lines.append("---")
