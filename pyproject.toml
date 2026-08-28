@@ -1,0 +1,20 @@
+[project]
+name = "yidai"
+version = "0.1.0"
+description = "意怠工程 — 个人投研分析系统"
+requires-python = ">=3.10"
+dependencies = [
+    "polars>=1.0.0",
+    "duckdb>=1.0.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
