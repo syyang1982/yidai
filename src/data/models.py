@@ -164,7 +164,9 @@ def _compute_signal(
         return "REDUCE"
 
     # 4. Strong buy signal (adjusted for 8-dim scale)
-    if total >= 33 and valuation >= 4:
+    # 审计发现: 盈利/现金流高分反预测力，健康/成长高分有预测力
+    # 故增加健康和成长门槛，排除"quality trap"
+    if total >= 33 and valuation >= 4 and health >= 3 and growth >= 3:
         return "BUY"
 
     # 5. Hold-worthy

@@ -116,7 +116,8 @@ def _compute_signal(total: int, scores: dict) -> str:
     if any(s < 2 for s in all_scores):
         return "REDUCE"
     # Strong buy signal (adjusted for 8-dim)
-    if total >= 33 and val >= 4:
+    # 审计发现: 健康/成长高分有预测力，增加门槛排除quality trap
+    if total >= 33 and val >= 4 and health >= 3 and grow >= 3:
         return "BUY"
     # Hold-worthy (adjusted for 8-dim)
     if total >= 17:
