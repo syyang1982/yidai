@@ -487,7 +487,7 @@ class AccuracyAuditor:
             rows = conn.execute(
                 "SELECT signal_id, ticker, signal_date, signal_type, "
                 "company_state, total_score, grade, dimension_scores "
-                "FROM signal_records WHERE status != 'superseded' "
+                "FROM signal_records WHERE 1=1 "
                 "ORDER BY signal_date"
             ).fetchall()
 

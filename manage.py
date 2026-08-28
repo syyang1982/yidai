@@ -1300,7 +1300,7 @@ def cmd_audit(args):
         print(f"  ✅ 回填 {updated} 条记录\n")
 
     stats = auditor.generate_full_report()
-    if stats.get("total", 0) == 0:
+    if not stats.get("windows") and stats.get("overall", {}).get("total", 0) == 0:
         print("暂无已回填的信号数据。请先运行: python manage.py audit --backfill")
         return
     print(auditor.format_report(stats))
