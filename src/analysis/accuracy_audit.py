@@ -432,7 +432,7 @@ class AccuracyAuditor:
         enriched = []
         for rec in records:
             actual = rec.get("actual_6m")
-            if isinstance(actual, dict) and "actual_price" in actual:
+            if isinstance(actual, dict) and actual.get("actual_price") is not None:
                 rec["current_price"] = actual["actual_price"]
                 enriched.append(rec)
 
