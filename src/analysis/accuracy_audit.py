@@ -237,3 +237,203 @@ class AccuracyAuditor:
             "by_grade": dict(by_grade_out),
             "by_dimension": by_dimension_out,
         }
+
+    # ------------------------------------------------------------------
+    # Price backfill
+    # ------------------------------------------------------------------
+
+    def backfill_prices(
+        self, fetcher=None, max_records: int = 100
+    ) -> int:
+        """Fetch current prices from eastmoney and write to actual_6m.
+
+        Args:
+            fetcher: An EastmoneyFetcher instance.  If None, one is created.
+            max_records: Max number of records to process.
+
+        Returns:
+            Number of records successfully updated.
+        """
+        if fetcher is None:
+            from src.data.fetcher import EastmoneyFetcher
+            fetcher = EastmoneyFetcher()
+
+        # 1. Read records with NULL actual_6m
+        conn = duckdb.connect(self.db_path, read_only=True)
+        try:
+            result = conn.execute(
+                "SELECT signal_id, ticker FROM signal_records "
+                "WHERE actual_6m IS NULL LIMIT ?",
+                [max_records],
+            ).fetchall()
+        finally:
+            conn.close()
+
+        if not result:
+            return 0
+
+        today = date.today().isoformat()
+        updated = 0
+
+        for signal_id, ticker in result:
+            try:
+                market, code = fetcher._detect_market(ticker)
+                if market == "hk":
+                    price_data = fetcher.fetch_price_hk(code)
+                elif market == "a_share":
+                    price_data = fetcher.fetch_price_a_share(code)
+                elif market == "us":
+                    price_data = fetcher.fetch_price_us(code)
+                else:
+                    continue
+
+                close_price = price_data.get("close_price")
+                actual_json = json.dumps({
+                    "actual_price": close_price,
+                    "backfill_date": today,
+                })
+
+                conn = duckdb.connect(self.db_path)
+                try:
+                    conn.execute(
+                        "UPDATE signal_records SET actual_6m = ? WHERE signal_id = ?",
+                        [actual_json, signal_id],
+                    )
+                finally:
+                    conn.close()
+
+                updated += 1
+            except Exception:
+                # Skip records that fail to fetch
+                continue
+
+        return updated
+
+    # ------------------------------------------------------------------
+    # Report formatting
+    # ------------------------------------------------------------------
+
+    def format_report(self, stats: dict) -> str:
+        """Format accuracy audit stats as a terminal report.
+
+        Args:
+            stats: Output of compute_accuracy_stats().
+
+        Returns:
+            Formatted string for terminal display.
+        """
+        sep = "=" * 60
+        thin = "─" * 56
+
+        total = stats["total"]
+        correct = stats["correct"]
+        acc = stats["direction_accuracy"] * 100
+        avg_ret = stats["avg_return_pct"] * 100
+
+        lines = [
+            sep,
+            "  📊 信号准确率审计报告",
+            sep,
+            "",
+            f"  🟢 整体方向准确率: {acc:.1f}% ({correct}/{total})",
+            f"  📈 平均收益率: {avg_ret:+.2f}%",
+            f"  📊 样本量: {total} 条信号",
+        ]
+
+        # --- By type ---
+        by_type = stats.get("by_type", {})
+        if by_type:
+            lines += [
+                "",
+                f"  {thin}",
+                "  📋 按信号类型",
+                f"  {thin}",
+                "  类型     样本   正确   准确率    平均收益",
+                f"  {thin}",
+            ]
+            for sig_type, bt in sorted(by_type.items()):
+                icon = {"BUY": "🟢", "REDUCE": "🔴", "HOLD": "🟡"}.get(sig_type, "⚪")
+                t = bt["total"]
+                c = bt["correct"]
+                a = bt["accuracy"] * 100
+                r = bt["avg_return"] * 100
+                lines.append(
+                    f"  {icon} {sig_type:<7s} {t:>4d}   {c:>4d}   {a:>5.1f}%   {r:>+7.2f}%"
+                )
+
+        # --- By grade ---
+        by_grade = stats.get("by_grade", {})
+        if by_grade:
+            lines += [
+                "",
+                f"  {thin}",
+                "  🎯 按评分等级 (A级信号是否更准?)",
+                f"  {thin}",
+                "  等级     样本   正确   准确率    平均收益",
+                f"  {thin}",
+            ]
+            for grade, bg in sorted(by_grade.items()):
+                icon = {"A": "🟢", "B": "🟡"}.get(grade, "🔴")
+                t = bg["total"]
+                c = bg["correct"]
+                a = bg["accuracy"] * 100
+                r = bg["avg_return"] * 100
+                lines.append(
+                    f"  {icon} {grade:<7s} {t:>4d}   {c:>4d}   {a:>5.1f}%   {r:>+7.2f}%"
+                )
+
+        # --- By dimension ---
+        by_dim = stats.get("by_dimension", {})
+        if by_dim:
+            lines += [
+                "",
+                f"  {thin}",
+                "  🔬 维度预测力排名 (高分组准确率 - 低分组准确率)",
+                f"  {thin}",
+            ]
+            sorted_dims = sorted(
+                by_dim.items(),
+                key=lambda x: x[1]["predictive_power"],
+                reverse=True,
+            )
+            for dim_name, dd in sorted_dims:
+                pp = dd["predictive_power"]
+                ha = dd["high_score_accuracy"] * 100
+                la = dd["low_score_accuracy"] * 100
+                if pp > 0.05:
+                    icon = "🟢"
+                elif pp >= -0.05:
+                    icon = "🟡"
+                else:
+                    icon = "🔴"
+                lines.append(
+                    f"  {icon} {dim_name:<6s} 预测力={pp:+.2f} "
+                    f"(高分{ha:.0f}% vs 低分{la:.0f}%)"
+                )
+
+        lines.append("")
+        lines.append(sep)
+
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Full report generation
+    # ------------------------------------------------------------------
+
+    def generate_full_report(self) -> dict:
+        """Load signals, enrich with actual prices, compute stats.
+
+        Returns:
+            stats dict from compute_accuracy_stats.
+        """
+        records = self.load_pending_signals()
+
+        # Filter to records that have actual_6m with actual_price
+        enriched = []
+        for rec in records:
+            actual = rec.get("actual_6m")
+            if isinstance(actual, dict) and "actual_price" in actual:
+                rec["current_price"] = actual["actual_price"]
+                enriched.append(rec)
+
+        return self.compute_accuracy_stats(enriched)
