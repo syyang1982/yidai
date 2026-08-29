@@ -471,3 +471,76 @@ def generate_signal_text(score_result: dict) -> str:
     if total <= 8:
         return "🔴 减仓 — 综合评分过低"
     return "🔴 减仓 — 存在明显风险"
+
+
+# ---------------------------------------------------------------------------
+# Leading indicator integration
+# ---------------------------------------------------------------------------
+
+# Map dimension names to the score keys returned by score_all()
+_DIMENSION_SCORE_KEYS = {
+    "profitability": "profitability_score",
+    "health": "health_score",
+    "cashflow": "cashflow_score",
+    "valuation": "valuation_score",
+    "growth": "growth_score",
+    "dividend": "dividend_score",
+}
+
+
+def apply_leading_indicator_adjustments(
+    scores: dict,
+    ticker: str,
+    li_db_path: str | None = None,
+) -> dict:
+    """Apply leading indicator adjustments to dimension scores.
+
+    If a leading indicator's status is 'negative', the corresponding
+    scorer dimension is adjusted per its dimension_map.  Similarly for
+    'positive' status adjustments.
+
+    Args:
+        scores: dict returned by score_all() (contains *_score keys).
+        ticker: stock ticker to look up.
+        li_db_path: optional path to leading_indicators.duckdb.
+
+    Returns:
+        New dict with adjusted dimension scores (original is not mutated).
+        Each score is clamped to [0, 5].
+    """
+    if li_db_path is None:
+        import os
+        li_db_path = os.path.join(
+            os.path.expanduser("~"), ".hermes", "yidai", "db",
+            "leading_indicators.duckdb",
+        )
+
+    try:
+        from src.analysis.leading_indicators import LeadingIndicatorStore
+        store = LeadingIndicatorStore(li_db_path)
+        indicators = store.get_indicators(ticker)
+        store.close()
+    except Exception:
+        return scores
+
+    adjustments: dict[str, float] = {}
+    for ind in indicators:
+        status = ind.get("status", "neutral")
+        dim_map = ind.get("dimension_map")
+        if not dim_map or not isinstance(dim_map, dict):
+            continue
+        status_adj = dim_map.get(status, {})
+        if not isinstance(status_adj, dict):
+            continue
+        for dim, adj in status_adj.items():
+            score_key = _DIMENSION_SCORE_KEYS.get(dim)
+            if score_key and score_key in scores:
+                adjustments[score_key] = adjustments.get(score_key, 0) + adj
+
+    if not adjustments:
+        return scores
+
+    result = dict(scores)
+    for score_key, adj in adjustments.items():
+        result[score_key] = max(0, min(5, result.get(score_key, 0) + adj))
+    return result

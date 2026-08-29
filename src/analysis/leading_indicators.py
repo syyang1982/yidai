@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS leading_indicators (
     latest_date DATE,
     status VARCHAR DEFAULT 'neutral',
     notes VARCHAR,
+    dimension_map JSON,
     created_at VARCHAR,
     updated_at VARCHAR,
     PRIMARY KEY (ticker, indicator_name)
@@ -49,13 +50,22 @@ _COLUMNS = [
     "ticker", "company_name", "indicator_name", "description", "source",
     "threshold_positive", "threshold_negative", "unit", "category",
     "latest_value", "latest_period", "latest_date", "status",
-    "notes", "created_at", "updated_at",
+    "notes", "dimension_map", "created_at", "updated_at",
 ]
 
 
 def _row_to_dict(row: tuple) -> dict:
     """Convert a DuckDB row to a dict."""
-    return dict(zip(_COLUMNS, row))
+    import json as _json
+    d = dict(zip(_COLUMNS, row))
+    # Parse dimension_map from JSON string to dict if needed
+    dm = d.get("dimension_map")
+    if isinstance(dm, str):
+        try:
+            d["dimension_map"] = _json.loads(dm)
+        except (ValueError, TypeError):
+            d["dimension_map"] = None
+    return d
 
 
 def _calculate_status(
@@ -105,6 +115,13 @@ class LeadingIndicatorStore:
     def _create_tables(self):
         """Create leading_indicators table if it does not exist."""
         self.conn.execute(_CREATE_TABLE)
+        # Migration: add dimension_map column to existing tables
+        try:
+            self.conn.execute(
+                "ALTER TABLE leading_indicators ADD COLUMN IF NOT EXISTS dimension_map JSON"
+            )
+        except Exception:
+            pass  # column already exists
 
     def add_indicator(
         self,
@@ -118,6 +135,7 @@ class LeadingIndicatorStore:
         unit: str,
         category: str,
         notes: str = "",
+        dimension_map: dict | None = None,
     ) -> dict:
         """Add or update a leading indicator definition.
 
@@ -132,18 +150,22 @@ class LeadingIndicatorStore:
             unit: Unit of measurement (e.g. '%', 'users', 'ratio').
             category: Category grouping (e.g. 'revenue_quality', 'growth').
             notes: Optional notes.
+            dimension_map: Optional dict mapping status to scorer dimension
+                adjustments. E.g. {"negative": {"growth": -1}, "positive": {"growth": 0.5}}.
 
         Returns:
             The stored record as a dict.
         """
+        import json as _json
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        dm_json = _json.dumps(dimension_map) if dimension_map else None
         self.conn.execute(
             """
             INSERT INTO leading_indicators (
                 ticker, company_name, indicator_name, description, source,
                 threshold_positive, threshold_negative, unit, category,
-                notes, status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'neutral', ?, ?)
+                notes, dimension_map, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'neutral', ?, ?)
             ON CONFLICT (ticker, indicator_name) DO UPDATE SET
                 company_name = EXCLUDED.company_name,
                 description = EXCLUDED.description,
@@ -153,12 +175,13 @@ class LeadingIndicatorStore:
                 unit = EXCLUDED.unit,
                 category = EXCLUDED.category,
                 notes = EXCLUDED.notes,
+                dimension_map = EXCLUDED.dimension_map,
                 updated_at = EXCLUDED.updated_at
             """,
             [
                 ticker, company_name, indicator_name, description, source,
                 threshold_positive, threshold_negative, unit, category,
-                notes, now, now,
+                notes, dm_json, now, now,
             ],
         )
 

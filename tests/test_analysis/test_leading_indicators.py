@@ -345,3 +345,208 @@ class TestGetAlerts:
         store.update_value("LX", "take_rate", 12.0, "2026Q2")  # → neutral
         alerts = store.get_alerts()
         assert not any(a["indicator_name"] == "take_rate" for a in alerts)
+
+
+# ---------------------------------------------------------------------------
+# test_dimension_map: dimension_map storage and retrieval
+# ---------------------------------------------------------------------------
+
+
+class TestDimensionMap:
+    def test_add_with_dimension_map(self, store):
+        """dimension_map should be stored and returned."""
+        dm = {"negative": {"growth": -1}, "positive": {"growth": 0.5}}
+        result = store.add_indicator(
+            ticker="LX", company_name="乐信", indicator_name="take_rate",
+            description="Take rate", source="s", threshold_positive=15.0,
+            threshold_negative=8.0, unit="%", category="revenue_quality",
+            dimension_map=dm,
+        )
+        assert result["dimension_map"] == dm
+
+    def test_add_without_dimension_map(self, store):
+        """Without dimension_map, should be None."""
+        result = store.add_indicator(
+            ticker="LX", company_name="乐信", indicator_name="take_rate",
+            description="Take rate", source="s", threshold_positive=15.0,
+            threshold_negative=8.0, unit="%", category="revenue_quality",
+        )
+        assert result["dimension_map"] is None
+
+    def test_dimension_map_survives_upsert(self, store):
+        """Upserting should update dimension_map."""
+        dm1 = {"negative": {"growth": -1}}
+        dm2 = {"negative": {"growth": -2}, "positive": {"growth": 1}}
+        store.add_indicator(
+            ticker="LX", company_name="乐信", indicator_name="take_rate",
+            description="v1", source="s", threshold_positive=15.0,
+            threshold_negative=8.0, unit="%", category="revenue_quality",
+            dimension_map=dm1,
+        )
+        result = store.add_indicator(
+            ticker="LX", company_name="乐信", indicator_name="take_rate",
+            description="v2", source="s", threshold_positive=15.0,
+            threshold_negative=8.0, unit="%", category="revenue_quality",
+            dimension_map=dm2,
+        )
+        assert result["dimension_map"] == dm2
+
+    def test_dimension_map_roundtrip(self, store):
+        """Read back from DB should parse JSON correctly."""
+        dm = {"negative": {"growth": -1, "profitability": -0.5},
+              "positive": {"growth": 0.5}}
+        store.add_indicator(
+            ticker="LX", company_name="乐信", indicator_name="take_rate",
+            description="Take rate", source="s", threshold_positive=15.0,
+            threshold_negative=8.0, unit="%", category="revenue_quality",
+            dimension_map=dm,
+        )
+        # Re-open store to force read from disk
+        store.close()
+        store2 = LeadingIndicatorStore(store.db_path)
+        results = store2.get_indicators(ticker="LX")
+        assert len(results) == 1
+        assert results[0]["dimension_map"] == dm
+        store2.close()
+
+
+# ---------------------------------------------------------------------------
+# test_apply_leading_indicator_adjustments: scorer integration
+# ---------------------------------------------------------------------------
+
+
+class TestApplyLeadingIndicatorAdjustments:
+    def _make_scores(self, **overrides):
+        """Create a base scores dict with defaults."""
+        base = {
+            "profitability_score": 3.0,
+            "health_score": 3.0,
+            "cashflow_score": 3.0,
+            "valuation_score": 3.0,
+            "growth_score": 3.0,
+            "dividend_score": 3.0,
+        }
+        base.update(overrides)
+        return base
+
+    def test_negative_indicator_reduces_dimension(self, tmp_db):
+        """A negative status indicator should reduce the mapped dimension."""
+        from src.analysis.scorer import apply_leading_indicator_adjustments
+
+        store = LeadingIndicatorStore(tmp_db)
+        store.add_indicator(
+            ticker="LX", company_name="乐信", indicator_name="take_rate",
+            description="Take rate", source="s", threshold_positive=15.0,
+            threshold_negative=8.0, unit="%", category="revenue_quality",
+            dimension_map={"negative": {"growth": -1}},
+        )
+        store.update_value("LX", "take_rate", 5.0, "2026Q2")  # → negative
+        store.close()
+
+        scores = self._make_scores(growth_score=3.0)
+        result = apply_leading_indicator_adjustments(scores, "LX", tmp_db)
+        assert result["growth_score"] == 2.0  # 3.0 + (-1)
+
+    def test_no_alerts_no_adjustment(self, tmp_db):
+        """Neutral indicators should not adjust scores."""
+        from src.analysis.scorer import apply_leading_indicator_adjustments
+
+        store = LeadingIndicatorStore(tmp_db)
+        store.add_indicator(
+            ticker="LX", company_name="乐信", indicator_name="take_rate",
+            description="Take rate", source="s", threshold_positive=15.0,
+            threshold_negative=8.0, unit="%", category="revenue_quality",
+            dimension_map={"negative": {"growth": -1}},
+        )
+        store.update_value("LX", "take_rate", 12.0, "2026Q2")  # → neutral
+        store.close()
+
+        scores = self._make_scores(growth_score=3.0)
+        result = apply_leading_indicator_adjustments(scores, "LX", tmp_db)
+        assert result["growth_score"] == 3.0  # unchanged
+
+    def test_multiple_indicators_accumulate(self, tmp_db):
+        """Multiple negative indicators should accumulate adjustments."""
+        from src.analysis.scorer import apply_leading_indicator_adjustments
+
+        store = LeadingIndicatorStore(tmp_db)
+        store.add_indicator(
+            ticker="LX", company_name="乐信", indicator_name="take_rate",
+            description="Take rate", source="s", threshold_positive=15.0,
+            threshold_negative=8.0, unit="%", category="revenue_quality",
+            dimension_map={"negative": {"growth": -1}},
+        )
+        store.add_indicator(
+            ticker="LX", company_name="乐信", indicator_name="revenue_growth",
+            description="Revenue growth", source="s", threshold_positive=20.0,
+            threshold_negative=5.0, unit="%", category="growth",
+            dimension_map={"negative": {"growth": -0.5}},
+        )
+        store.update_value("LX", "take_rate", 5.0, "2026Q2")    # → negative
+        store.update_value("LX", "revenue_growth", 3.0, "2026Q2")  # → negative
+        store.close()
+
+        scores = self._make_scores(growth_score=3.0)
+        result = apply_leading_indicator_adjustments(scores, "LX", tmp_db)
+        assert result["growth_score"] == 1.5  # 3.0 + (-1) + (-0.5)
+
+    def test_positive_indicator_boosts_dimension(self, tmp_db):
+        """A positive status indicator should boost the mapped dimension."""
+        from src.analysis.scorer import apply_leading_indicator_adjustments
+
+        store = LeadingIndicatorStore(tmp_db)
+        store.add_indicator(
+            ticker="LX", company_name="乐信", indicator_name="take_rate",
+            description="Take rate", source="s", threshold_positive=15.0,
+            threshold_negative=8.0, unit="%", category="revenue_quality",
+            dimension_map={"negative": {"growth": -1}, "positive": {"growth": 0.5}},
+        )
+        store.update_value("LX", "take_rate", 20.0, "2026Q2")  # → positive
+        store.close()
+
+        scores = self._make_scores(growth_score=3.0)
+        result = apply_leading_indicator_adjustments(scores, "LX", tmp_db)
+        assert result["growth_score"] == 3.5  # 3.0 + 0.5
+
+    def test_score_clamped_to_0_and_5(self, tmp_db):
+        """Scores should be clamped to [0, 5]."""
+        from src.analysis.scorer import apply_leading_indicator_adjustments
+
+        store = LeadingIndicatorStore(tmp_db)
+        store.add_indicator(
+            ticker="LX", company_name="乐信", indicator_name="take_rate",
+            description="Take rate", source="s", threshold_positive=15.0,
+            threshold_negative=8.0, unit="%", category="revenue_quality",
+            dimension_map={"negative": {"growth": -3}},
+        )
+        store.update_value("LX", "take_rate", 5.0, "2026Q2")  # → negative
+        store.close()
+
+        scores = self._make_scores(growth_score=1.0)
+        result = apply_leading_indicator_adjustments(scores, "LX", tmp_db)
+        assert result["growth_score"] == 0  # clamped: 1.0 + (-3) = -2 → 0
+
+    def test_no_dimension_map_no_effect(self, tmp_db):
+        """Indicators without dimension_map should have no effect."""
+        from src.analysis.scorer import apply_leading_indicator_adjustments
+
+        store = LeadingIndicatorStore(tmp_db)
+        store.add_indicator(
+            ticker="LX", company_name="乐信", indicator_name="take_rate",
+            description="Take rate", source="s", threshold_positive=15.0,
+            threshold_negative=8.0, unit="%", category="revenue_quality",
+        )
+        store.update_value("LX", "take_rate", 5.0, "2026Q2")  # → negative
+        store.close()
+
+        scores = self._make_scores(growth_score=3.0)
+        result = apply_leading_indicator_adjustments(scores, "LX", tmp_db)
+        assert result["growth_score"] == 3.0  # no dimension_map → no effect
+
+    def test_nonexistent_ticker_returns_unchanged(self, tmp_db):
+        """Ticker with no indicators should return scores unchanged."""
+        from src.analysis.scorer import apply_leading_indicator_adjustments
+
+        scores = self._make_scores(growth_score=3.0)
+        result = apply_leading_indicator_adjustments(scores, "NONEXISTENT", tmp_db)
+        assert result["growth_score"] == 3.0
