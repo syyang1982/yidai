@@ -97,6 +97,8 @@ def _compute_metrics(
         "cagr": 0,
         "max_drawdown": 0,
         "sharpe_ratio": 0,
+        "sortino_ratio": 0,
+        "calmar_ratio": 0,
         "benchmark_return": 0,
         "alpha": 0,
         "num_trades": 0,
@@ -134,6 +136,7 @@ def _compute_metrics(
 
     # --- Sharpe ratio (daily returns, annualised, risk-free = 0) ---
     sharpe = 0.0
+    sortino = 0.0
     if len(portfolio_values) >= 2:
         daily_rets = []
         for i in range(1, len(portfolio_values)):
@@ -147,6 +150,19 @@ def _compute_metrics(
             std_r = math.sqrt(var_r)
             if std_r > 0:
                 sharpe = (mean_r / std_r) * math.sqrt(252)
+
+            # --- Sortino ratio (downside deviation only) ---
+            downside_rets = [r for r in daily_rets if r < 0]
+            if downside_rets:
+                downside_var = sum(r ** 2 for r in downside_rets) / len(downside_rets)
+                downside_std = math.sqrt(downside_var)
+                if downside_std > 0:
+                    sortino = (mean_r / downside_std) * math.sqrt(252)
+
+    # --- Calmar ratio (CAGR / Max Drawdown) ---
+    calmar = 0.0
+    if max_dd > 0:
+        calmar = cagr / max_dd
 
     # --- benchmark return ---
     benchmark_return = 0.0
@@ -184,6 +200,8 @@ def _compute_metrics(
         "cagr": cagr,
         "max_drawdown": max_dd,
         "sharpe_ratio": sharpe,
+        "sortino_ratio": sortino,
+        "calmar_ratio": calmar,
         "benchmark_return": benchmark_return,
         "alpha": alpha,
         "num_trades": num_trades,

@@ -252,7 +252,7 @@ class AccuracyAuditor:
         """
         # 1. Check cache
         cache_key = f"{ticker}:{target_date}"
-        if cache_key in self._price_cache:
+        if hasattr(self, "_price_cache") and cache_key in self._price_cache:
             return self._price_cache[cache_key]
 
         # 2. Try Yahoo Finance
@@ -263,7 +263,8 @@ class AccuracyAuditor:
             price = self._fetch_eastmoney_fallback(ticker)
 
         # 4. Cache result (including None to avoid re-fetching)
-        self._price_cache[cache_key] = price
+        if hasattr(self, "_price_cache"):
+            self._price_cache[cache_key] = price
         return price
 
     def _fetch_yahoo_price(

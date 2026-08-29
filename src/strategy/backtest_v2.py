@@ -40,6 +40,33 @@ _DEFAULT_CONFIG = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Trade cost model
+# ---------------------------------------------------------------------------
+
+COMMISSION_RATE = 0.0003   # 0.03% commission
+STAMP_TAX_RATE = 0.0013    # 0.13% stamp tax (sell only)
+SLIPPAGE_RATE = 0.001      # 0.1% slippage
+
+
+def _apply_trade_cost(price: float, shares: int, action: str) -> float:
+    """Apply commission + stamp tax + slippage to a trade.
+
+    Args:
+        price: execution price per share
+        shares: number of shares traded
+        action: 'BUY' or 'SELL'
+
+    Returns:
+        total cost (in currency units) to deduct from cash
+    """
+    gross = price * shares
+    commission = gross * COMMISSION_RATE
+    slippage = gross * SLIPPAGE_RATE
+    stamp = gross * STAMP_TAX_RATE if action in ("SELL", "REDUCE") else 0
+    return commission + slippage + stamp
+
+
 def _is_annual_period(period: str) -> bool:
     """Check if a period string represents an annual period (FY2024, 2024, etc.)."""
     p = period.upper().strip()
@@ -97,8 +124,10 @@ def _has_required_fields(fin: dict) -> bool:
 class BacktestEngineV2:
     """Backtest engine with quarterly data, trend filters, and gradual sizing."""
 
-    def __init__(self, initial_capital: float = 1_000_000, config: Optional[dict] = None):
+    def __init__(self, initial_capital: float = 1_000_000, config: Optional[dict] = None,
+                 use_cost_model: bool = True):
         self.initial_capital = initial_capital
+        self.use_cost_model = use_cost_model
         self.config = {**_DEFAULT_CONFIG}
         if config:
             self.config.update(config)
@@ -296,6 +325,7 @@ class BacktestEngineV2:
         portfolio_values: List[Tuple[str, float]] = []
         benchmark_values: List[Tuple[str, float]] = []
         trend_filter_blocked = 0
+        total_trade_cost = 0.0
 
         # --- benchmark: buy-and-hold from day 1 ---
         benchmark_shares = 0.0
@@ -572,6 +602,8 @@ class BacktestEngineV2:
         # --- metrics ---
         metrics = _compute_metrics(portfolio_values, benchmark_values, trades)
         metrics["trend_filter_blocked"] = trend_filter_blocked
+        total_trade_cost = sum(t.get("trade_cost", 0) for t in trades)
+        metrics["total_trade_cost"] = total_trade_cost
 
         return {
             "trades": trades,
@@ -606,6 +638,7 @@ class BacktestEngineV2:
         cfg = self.config
         trades = []
         blocked = 0
+        trade_cost_total = 0.0
 
         if signal == "BUY":
             if trend_status == "below_ma" and cfg["trend_filter_enabled"]:
@@ -619,7 +652,11 @@ class BacktestEngineV2:
                 new_shares = int(invest_amount / trade_price)
                 if new_shares > 0:
                     cost = new_shares * trade_price
-                    cash -= cost
+                    trade_cost = 0.0
+                    if self.use_cost_model:
+                        trade_cost = _apply_trade_cost(trade_price, new_shares, "BUY")
+                        trade_cost_total += trade_cost
+                    cash -= (cost + trade_cost)
                     shares = new_shares
                     entry_price = trade_price
                     trades.append({
@@ -628,6 +665,7 @@ class BacktestEngineV2:
                         "shares": new_shares,
                         "price": trade_price,
                         "value": cost,
+                        "trade_cost": trade_cost,
                         "partial": cfg["buy_pct"] < 1.0,
                     })
 
@@ -637,7 +675,11 @@ class BacktestEngineV2:
                 new_shares = int(invest_amount / trade_price)
                 if new_shares > 0 and cash >= new_shares * trade_price:
                     cost = new_shares * trade_price
-                    cash -= cost
+                    trade_cost = 0.0
+                    if self.use_cost_model:
+                        trade_cost = _apply_trade_cost(trade_price, new_shares, "BUY")
+                        trade_cost_total += trade_cost
+                    cash -= (cost + trade_cost)
                     entry_price = self._update_entry_price(
                         shares, entry_price, new_shares, trade_price
                     )
@@ -648,6 +690,7 @@ class BacktestEngineV2:
                         "shares": new_shares,
                         "price": trade_price,
                         "value": cost,
+                        "trade_cost": trade_cost,
                         "partial": True,
                     })
 
@@ -663,8 +706,12 @@ class BacktestEngineV2:
 
                 if sell_shares > 0:
                     proceeds = sell_shares * trade_price
+                    trade_cost = 0.0
+                    if self.use_cost_model:
+                        trade_cost = _apply_trade_cost(trade_price, sell_shares, "SELL")
+                        trade_cost_total += trade_cost
                     remaining = shares - sell_shares
-                    cash += proceeds
+                    cash += (proceeds - trade_cost)
                     shares = remaining
                     trades.append({
                         "date": str(trade_date),
@@ -672,7 +719,8 @@ class BacktestEngineV2:
                         "shares": sell_shares,
                         "price": trade_price,
                         "value": proceeds,
-                        "partial": sell_shares < (shares + sell_shares),  # was partial if not all sold
+                        "trade_cost": trade_cost,
+                        "partial": sell_shares < (shares + sell_shares),
                     })
                     if shares == 0:
                         entry_price = 0.0
@@ -702,7 +750,10 @@ class BacktestEngineV2:
             new_shares = int(cash / trade_price)
             if new_shares > 0:
                 cost = new_shares * trade_price
-                cash -= cost
+                trade_cost = 0.0
+                if self.use_cost_model:
+                    trade_cost = _apply_trade_cost(trade_price, new_shares, "BUY")
+                cash -= (cost + trade_cost)
                 shares = new_shares
                 trades.append({
                     "date": str(trade_date),
@@ -710,20 +761,185 @@ class BacktestEngineV2:
                     "shares": new_shares,
                     "price": trade_price,
                     "value": cost,
+                    "trade_cost": trade_cost,
                     "partial": False,
                 })
 
         elif signal == "REDUCE" and shares > 0:
             proceeds = shares * trade_price
+            trade_cost = 0.0
+            if self.use_cost_model:
+                trade_cost = _apply_trade_cost(trade_price, shares, "SELL")
             trades.append({
                 "date": str(trade_date),
                 "action": "SELL",
                 "shares": shares,
                 "price": trade_price,
                 "value": proceeds,
+                "trade_cost": trade_cost,
                 "partial": False,
             })
-            cash += proceeds
+            cash += (proceeds - trade_cost)
             shares = 0
 
         return cash, shares, trades
+
+    # ------------------------------------------------------------------
+    # Walk-forward validation
+    # ------------------------------------------------------------------
+
+    def walk_forward(
+        self,
+        ticker: str,
+        all_financials: List[dict],
+        all_prices: List[dict],
+        train_years: int = 5,
+        test_years: int = 1,
+        ownership_scores: Optional[Dict[str, int]] = None,
+        strategy_scores: Optional[Dict[str, int]] = None,
+        revenue_growth_rates: Optional[Dict[str, List[float]]] = None,
+        growth_drivers: Optional[Dict[str, List[str]]] = None,
+    ) -> dict:
+        """Walk-forward validation.
+
+        Splits financial data into rolling train/test windows, runs the
+        backtest on each test window, and aggregates the out-of-sample
+        metrics.
+
+        Args:
+            ticker: stock ticker
+            all_financials: list of all financial dicts (sorted by period ASC)
+            all_prices: list of all price dicts (sorted by date ASC)
+            train_years: number of years for training (in-sample)
+            test_years: number of years for testing (out-of-sample)
+            ownership_scores, strategy_scores, revenue_growth_rates,
+            growth_drivers: passed through to run()
+
+        Returns:
+            dict with:
+              - windows: list of per-window results (train_metrics, test_metrics, period)
+              - aggregated_test_metrics: average metrics across all test windows
+              - n_windows: number of walk-forward windows
+        """
+        if ownership_scores is None:
+            ownership_scores = {}
+        if strategy_scores is None:
+            strategy_scores = {}
+        if growth_drivers is None:
+            growth_drivers = {}
+
+        sorted_financials = sorted(all_financials, key=lambda f: f["period"])
+        sorted_prices = sorted(all_prices, key=lambda p: _parse_date(p["date"]))
+
+        if not sorted_financials or not sorted_prices:
+            return {"windows": [], "aggregated_test_metrics": {}, "n_windows": 0}
+
+        # Extract years from financial periods
+        def _period_year(fin: dict) -> int:
+            p = fin["period"]
+            # Try date-based: 2024-09-30
+            if len(p) >= 4 and p[:4].isdigit():
+                return int(p[:4])
+            # FYxxxx
+            if p.upper().startswith("FY") and p[2:].isdigit():
+                return int(p[2:])
+            # Qn yyyy
+            for q in ["Q1", "Q2", "Q3", "Q4"]:
+                if p.upper().startswith(q):
+                    try:
+                        return int(p[len(q):].strip())
+                    except ValueError:
+                        pass
+            return 0
+
+        # Group financials by year
+        years = sorted(set(_period_year(f) for f in sorted_financials))
+        if len(years) < train_years + test_years:
+            # Not enough data — run a single backtest on everything
+            result = self.run(
+                ticker, sorted_financials, sorted_prices,
+                ownership_scores, strategy_scores,
+                revenue_growth_rates, growth_drivers,
+            )
+            return {
+                "windows": [{
+                    "train_years": years,
+                    "test_years": years,
+                    "train_metrics": result["metrics"],
+                    "test_metrics": result["metrics"],
+                }],
+                "aggregated_test_metrics": result["metrics"],
+                "n_windows": 1,
+            }
+
+        windows = []
+        step = test_years
+
+        for start_idx in range(0, len(years) - train_years - test_years + 1, step):
+            train_year_list = years[start_idx: start_idx + train_years]
+            test_year_list = years[start_idx + train_years: start_idx + train_years + test_years]
+
+            if not test_year_list:
+                break
+
+            train_min = train_year_list[0]
+            train_max = train_year_list[-1]
+            test_min = test_year_list[0]
+            test_max = test_year_list[-1]
+
+            # Split financials
+            train_fin = [f for f in sorted_financials
+                         if train_min <= _period_year(f) <= train_max]
+            test_fin = [f for f in sorted_financials
+                        if test_min <= _period_year(f) <= test_max]
+
+            # Split prices by year
+            train_prices = [p for p in sorted_prices
+                            if train_min <= _parse_date(p["date"]).year <= train_max + 1]
+            test_prices = [p for p in sorted_prices
+                           if test_min <= _parse_date(p["date"]).year <= test_max + 1]
+
+            if not test_fin or not test_prices:
+                continue
+
+            # Run on train window
+            train_result = self.run(
+                ticker, train_fin, train_prices,
+                ownership_scores, strategy_scores,
+                revenue_growth_rates, growth_drivers,
+            )
+
+            # Run on test window
+            test_result = self.run(
+                ticker, test_fin, test_prices,
+                ownership_scores, strategy_scores,
+                revenue_growth_rates, growth_drivers,
+            )
+
+            windows.append({
+                "train_period": f"{train_min}-{train_max}",
+                "test_period": f"{test_min}-{test_max}",
+                "train_metrics": train_result["metrics"],
+                "test_metrics": test_result["metrics"],
+            })
+
+        # Aggregate test metrics
+        metric_keys = [
+            "total_return", "cagr", "max_drawdown", "sharpe_ratio",
+            "sortino_ratio", "calmar_ratio", "benchmark_return",
+            "alpha", "num_trades", "win_rate", "total_trade_cost",
+        ]
+        aggregated = {}
+        if windows:
+            for key in metric_keys:
+                values = [w["test_metrics"].get(key, 0) for w in windows]
+                aggregated[key] = sum(values) / len(values) if values else 0
+        else:
+            for key in metric_keys:
+                aggregated[key] = 0
+
+        return {
+            "windows": windows,
+            "aggregated_test_metrics": aggregated,
+            "n_windows": len(windows),
+        }
