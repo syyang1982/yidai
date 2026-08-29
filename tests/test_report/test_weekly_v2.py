@@ -134,7 +134,7 @@ def _seed_signal_tracker(db_path: str) -> SignalTracker:
     tracker.record_signal(
         ticker="0700.HK",
         company_name="腾讯控股",
-        signal_date=(date.today() - timedelta(days=30)).isoformat(),
+        signal_date=(date.today() - timedelta(days=200)).isoformat(),
         signal_type="BUY",
         company_state={"price": 350.0, "pe": 20.0, "revenue": 650e9, "net_income": 160e9},
         dimension_scores={"盈利": 5, "健康": 5, "现金流": 5, "估值": 4, "成长": 4, "股东": 5, "战略": 5},
@@ -146,7 +146,7 @@ def _seed_signal_tracker(db_path: str) -> SignalTracker:
     tracker.record_signal(
         ticker="AAPL",
         company_name="Apple Inc.",
-        signal_date=(date.today() - timedelta(days=60)).isoformat(),
+        signal_date=(date.today() - timedelta(days=250)).isoformat(),
         signal_type="HOLD",
         company_state={"price": 190.0, "pe": 29.0, "revenue": 390e9, "net_income": 100e9},
         dimension_scores={"盈利": 4, "健康": 4, "现金流": 4, "估值": 4, "成长": 4, "股东": 4, "战略": 4},

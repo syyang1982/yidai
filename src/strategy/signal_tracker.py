@@ -402,20 +402,35 @@ class SignalTracker:
             "avg_accuracy": round(avg_acc, 4),
         }
 
-    def get_pending_reviews(self, period: str = "6m") -> list:
-        """获取需要回顾的信号（已过6m/12m但未记录结果）。"""
+    def get_pending_reviews(self, period: str = "6m", min_days_old: int = 0) -> list:
+        """获取需要回顾的信号（已过6m/12m但未记录结果）。
+
+        Args:
+            period: "6m" or "12m"
+            min_days_old: only return signals older than N days (0=no filter)
+        """
         if period == "6m":
             status_filter = "active_6m"
         else:
             status_filter = "active_12m"
 
-        rows = self.conn.execute(
-            """SELECT signal_id, ticker, company_name, signal_date, signal_type,
-                      total_score, grade, status
-               FROM signal_records WHERE status = ?
-               ORDER BY signal_date""",
-            [status_filter],
-        ).fetchall()
+        if min_days_old > 0:
+            cutoff = (date.today() - timedelta(days=min_days_old)).isoformat()
+            rows = self.conn.execute(
+                """SELECT signal_id, ticker, company_name, signal_date, signal_type,
+                          total_score, grade, status
+                   FROM signal_records WHERE status = ? AND signal_date <= ?
+                   ORDER BY signal_date""",
+                [status_filter, cutoff],
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """SELECT signal_id, ticker, company_name, signal_date, signal_type,
+                          total_score, grade, status
+                   FROM signal_records WHERE status = ?
+                   ORDER BY signal_date""",
+                [status_filter],
+            ).fetchall()
 
         results = []
         for row in rows:

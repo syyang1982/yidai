@@ -452,8 +452,8 @@ def generate_report_v2(
     if signal_tracker is not None:
         try:
             new_signals = signal_tracker.get_signal_history()[-5:]  # last 5 as "new"
-            pending_6m = signal_tracker.get_pending_reviews("6m")
-            pending_12m = signal_tracker.get_pending_reviews("12m")
+            pending_6m = signal_tracker.get_pending_reviews("6m", min_days_old=180)
+            pending_12m = signal_tracker.get_pending_reviews("12m", min_days_old=365)
         except Exception:
             pass
 
