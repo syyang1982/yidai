@@ -120,3 +120,106 @@ class TestCheckAll:
         report = pc.format_report(result)
         assert isinstance(report, str)
         assert len(report) > 0
+
+
+class TestVolatility:
+    """Annualised volatility checks."""
+
+    def test_high_volatility_flagged(self):
+        """年化波动率>60%触发告警"""
+        pc = PortfolioConstraints()
+        holdings = [
+            {"ticker": "1810.HK", "name": "小米", "value_hkd": 100_000, "volatility_annual": 0.72},
+            {"ticker": "0700.HK", "name": "腾讯", "value_hkd": 200_000, "volatility_annual": 0.35},
+        ]
+        violations = pc.check_volatility(holdings)
+        assert len(violations) == 1
+        assert violations[0]["type"] == "high_volatility"
+        assert violations[0]["ticker"] == "1810.HK"
+        assert violations[0]["volatility"] == 0.72
+
+    def test_volatility_within_limit(self):
+        """波动率<=60%不触发"""
+        pc = PortfolioConstraints()
+        holdings = [
+            {"ticker": "0700.HK", "name": "腾讯", "value_hkd": 200_000, "volatility_annual": 0.55},
+        ]
+        assert pc.check_volatility(holdings) == []
+
+
+class TestLiquidity:
+    """Daily liquidity checks."""
+
+    def test_low_liquidity_flagged(self):
+        """日均成交额<1亿触发告警"""
+        pc = PortfolioConstraints()
+        holdings = [
+            {"ticker": "9999.HK", "name": "某小盘股", "value_hkd": 50_000, "avg_daily_volume_hkd": 30_000_000},
+            {"ticker": "0700.HK", "name": "腾讯", "value_hkd": 200_000, "avg_daily_volume_hkd": 5_000_000_000},
+        ]
+        violations = pc.check_liquidity(holdings)
+        assert len(violations) == 1
+        assert violations[0]["type"] == "low_liquidity"
+        assert violations[0]["ticker"] == "9999.HK"
+        assert violations[0]["volume"] == 30_000_000
+
+    def test_liquidity_within_limit(self):
+        """日均>=1亿不触发"""
+        pc = PortfolioConstraints()
+        holdings = [
+            {"ticker": "0700.HK", "name": "腾讯", "value_hkd": 200_000, "avg_daily_volume_hkd": 5_000_000_000},
+        ]
+        assert pc.check_liquidity(holdings) == []
+
+
+class TestStopLoss:
+    """Stop-loss condition checks."""
+
+    def test_hard_stop_loss(self):
+        """亏损>50%触发硬止损"""
+        pc = PortfolioConstraints()
+        holdings = [
+            {"ticker": "1810.HK", "name": "小米", "value_hkd": 50_000,
+             "cost_basis": 10.0, "current_price": 4.0},
+        ]
+        violations = pc.check_stop_loss(holdings)
+        hard = [v for v in violations if v["type"] == "hard_stop_loss"]
+        assert len(hard) == 1
+        assert hard[0]["pnl"] == pytest.approx(-0.60)
+
+    def test_stop_loss_price_triggered(self):
+        """当前价<=止损价触发"""
+        pc = PortfolioConstraints()
+        holdings = [
+            {"ticker": "0700.HK", "name": "腾讯", "value_hkd": 200_000,
+             "cost_basis": 400.0, "current_price": 350.0, "stop_loss_price": 360.0},
+        ]
+        violations = pc.check_stop_loss(holdings)
+        triggered = [v for v in violations if v["type"] == "stop_loss_triggered"]
+        assert len(triggered) == 1
+        assert triggered[0]["current"] == 350.0
+        assert triggered[0]["stop"] == 360.0
+
+    def test_fundamental_deterioration(self):
+        """REDUCE信号+亏损>20%触发基本面+技术双确认止损"""
+        pc = PortfolioConstraints()
+        holdings = [
+            {"ticker": "9988.HK", "name": "阿里巴巴", "value_hkd": 80_000,
+             "cost_basis": 100.0, "current_price": 70.0, "signal": "REDUCE"},
+        ]
+        violations = pc.check_stop_loss(holdings)
+        fund = [v for v in violations if v["type"] == "fundamental_deterioration"]
+        assert len(fund) == 1
+        assert fund[0]["signal"] == "REDUCE"
+        assert fund[0]["pnl"] == pytest.approx(-0.30)
+
+    def test_no_stop_loss_trigger(self):
+        """正常持仓不触发任何止损"""
+        pc = PortfolioConstraints()
+        holdings = [
+            {"ticker": "0700.HK", "name": "腾讯", "value_hkd": 200_000,
+             "cost_basis": 300.0, "current_price": 380.0, "stop_loss_price": 250.0,
+             "signal": "BUY"},
+        ]
+        violations = pc.check_stop_loss(holdings)
+        assert violations == []

@@ -120,6 +120,103 @@ class PortfolioConstraints:
                 })
         return violations
 
+    # ── risk budget checks ────────────────────────────────────────
+
+    def check_volatility(self, holdings: List[dict]) -> List[dict]:
+        """Flag holdings with annualised volatility above 60%.
+
+        Each holding must include ``volatility_annual`` (0-1 float, e.g. 0.6 = 60%).
+        """
+        violations: List[dict] = []
+        for h in holdings:
+            vol = h.get("volatility_annual", 0)
+            if vol > 0.60:
+                violations.append({
+                    "type": "high_volatility",
+                    "ticker": h.get("ticker"),
+                    "name": h.get("name"),
+                    "volatility": vol,
+                    "limit": 0.60,
+                    "message": f"{h.get('name')} 年化波动率{vol:.0%} > 60%上限，建议减半仓",
+                })
+        return violations
+
+    def check_liquidity(self, holdings: List[dict]) -> List[dict]:
+        """Flag holdings with average daily turnover below HK$100M.
+
+        Each holding must include ``avg_daily_volume_hkd``.
+        """
+        violations: List[dict] = []
+        for h in holdings:
+            vol = h.get("avg_daily_volume_hkd", float("inf"))
+            if vol < 100_000_000:
+                violations.append({
+                    "type": "low_liquidity",
+                    "ticker": h.get("ticker"),
+                    "name": h.get("name"),
+                    "volume": vol,
+                    "limit": 100_000_000,
+                    "message": f"{h.get('name')} 日均成交额{vol / 1e8:.1f}亿 < 1亿，流动性不足",
+                })
+        return violations
+
+    def check_stop_loss(self, holdings: List[dict]) -> List[dict]:
+        """Flag holdings that breach stop-loss conditions.
+
+        Each holding should include:
+        - cost_basis: entry price
+        - current_price: latest price
+        - stop_loss_price (optional): explicit stop level
+        - signal (optional): current signal string (e.g. ``"REDUCE"``)
+
+        Three stop-loss triggers:
+        1. Hard stop — realised loss > 50 %
+        2. Price stop — current price <= stop_loss_price
+        3. Fundamental + technical — signal == REDUCE and loss > 20 %
+        """
+        violations: List[dict] = []
+        for h in holdings:
+            cost = h.get("cost_basis", 0)
+            current = h.get("current_price", 0)
+            stop = h.get("stop_loss_price")
+            signal = h.get("signal", "")
+
+            if cost > 0 and current > 0:
+                pnl = (current - cost) / cost
+
+                # 1. Hard stop: loss > 50 %
+                if pnl < -0.50:
+                    violations.append({
+                        "type": "hard_stop_loss",
+                        "ticker": h.get("ticker"),
+                        "name": h.get("name"),
+                        "pnl": pnl,
+                        "message": f"{h.get('name')} 亏损{pnl:.0%}，触发硬止损(-50%)",
+                    })
+
+                # 2. Stop-loss price triggered
+                if stop and current <= stop:
+                    violations.append({
+                        "type": "stop_loss_triggered",
+                        "ticker": h.get("ticker"),
+                        "name": h.get("name"),
+                        "current": current,
+                        "stop": stop,
+                        "message": f"{h.get('name')} 当前价{current} <= 止损价{stop}",
+                    })
+
+                # 3. Fundamental deterioration + technical breakdown
+                if signal == "REDUCE" and pnl < -0.20:
+                    violations.append({
+                        "type": "fundamental_deterioration",
+                        "ticker": h.get("ticker"),
+                        "name": h.get("name"),
+                        "signal": signal,
+                        "pnl": pnl,
+                        "message": f"{h.get('name')} 信号REDUCE + 亏损{pnl:.0%}，基本面+技术双确认止损",
+                    })
+        return violations
+
     # ── aggregate check ───────────────────────────────────────────
 
     def check_all(self, holdings: List[dict]) -> dict:
@@ -128,12 +225,18 @@ class PortfolioConstraints:
         sector_violations = self.check_sector_concentration(holdings)
         market_violations = self.check_market_exposure(holdings)
         correlation_violations = self.check_correlation_groups(holdings)
+        volatility_violations = self.check_volatility(holdings)
+        liquidity_violations = self.check_liquidity(holdings)
+        stop_loss_violations = self.check_stop_loss(holdings)
 
         total = (
             len(position_violations)
             + len(sector_violations)
             + len(market_violations)
             + len(correlation_violations)
+            + len(volatility_violations)
+            + len(liquidity_violations)
+            + len(stop_loss_violations)
         )
 
         return {
@@ -141,6 +244,9 @@ class PortfolioConstraints:
             "sector_violations": sector_violations,
             "market_violations": market_violations,
             "correlation_violations": correlation_violations,
+            "volatility_violations": volatility_violations,
+            "liquidity_violations": liquidity_violations,
+            "stop_loss_violations": stop_loss_violations,
             "total_violations": total,
         }
 
@@ -195,6 +301,30 @@ class PortfolioConstraints:
                 )
         else:
             lines.append("\n✅ 相关性组合规")
+
+        vv = result["volatility_violations"]
+        if vv:
+            lines.append(f"\n⚠️  波动率过高 ({len(vv)}):")
+            for v in vv:
+                lines.append(f"  {v['message']}")
+        else:
+            lines.append("\n✅ 波动率合规")
+
+        lv = result["liquidity_violations"]
+        if lv:
+            lines.append(f"\n⚠️  流动性不足 ({len(lv)}):")
+            for v in lv:
+                lines.append(f"  {v['message']}")
+        else:
+            lines.append("\n✅ 流动性合规")
+
+        slv = result["stop_loss_violations"]
+        if slv:
+            lines.append(f"\n🚨 止损告警 ({len(slv)}):")
+            for v in slv:
+                lines.append(f"  {v['message']}")
+        else:
+            lines.append("\n✅ 无止损触发")
 
         lines.append(f"\n总违规数: {result['total_violations']}")
         lines.append("=" * 50)
