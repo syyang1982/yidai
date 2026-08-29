@@ -223,7 +223,7 @@ def generate_company_report(
         total = score_result.get("total_score", 0)
         grade = score_result.get("grade", "F")
         signal = score_result.get("signal", "WATCH")
-        lines.append(f"**总分**: {total}/35 (**{grade}**) 信号: **{signal}**")
+        lines.append(f"**总分**: {total}/40 (**{grade}**) 信号: **{signal}**")
         lines.append("")
         lines.append("| 维度 | 分数 | 状态 |")
         lines.append("|------|------|------|")
@@ -301,7 +301,7 @@ def generate_company_report(
         for s in signals[-10:]:  # last 10
             lines.append(
                 f"| {s.get('signal_date', '')} | {s.get('signal_type', '')} | "
-                f"{s.get('total_score', '')}/35 | {s.get('grade', '')} | "
+                f"{s.get('total_score', '')}/40 | {s.get('grade', '')} | "
                 f"{s.get('signal_source', '')} |"
             )
         lines.append("")

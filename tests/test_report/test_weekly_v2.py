@@ -466,7 +466,7 @@ class TestNextGradeInfo:
     """Test the grade boundary helper."""
 
     def test_near_a(self):
-        info = _next_grade_info(28)
+        info = _next_grade_info(32)
         assert info is not None
         assert info["next_grade"] == "A"
         assert info["gap"] == 1

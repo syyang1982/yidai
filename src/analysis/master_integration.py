@@ -479,7 +479,7 @@ def format_integrated_assessment(result: dict) -> str:
     # Final verdict
     lines.append(f"\n  ═══════════════════════════════════════")
     lines.append(f"  综合结论: {result.get('verdict', '?')}")
-    lines.append(f"  意怠基础分: {result.get('yidai_total', '?')}/35")
+    lines.append(f"  意怠基础分: {result.get('yidai_total', '?')}/40")
     lines.append(f"  ═══════════════════════════════════════")
 
     return "\n".join(lines)

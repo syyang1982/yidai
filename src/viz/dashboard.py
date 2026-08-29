@@ -341,6 +341,7 @@ RADAR_DIMENSIONS = [
     ("cashflow",      "现金流"),
     ("valuation",     "估值"),
     ("growth",        "成长"),
+    ("dividend",      "股息"),
     ("ownership",     "股东"),
     ("strategy",      "战略"),
 ]
@@ -402,18 +403,18 @@ def render_score_radar(scores: dict) -> str:
     lines.append(_box_sep(box_w))
 
     # Grade
-    if total >= 29:
+    if total >= 33:
         grade = "A"
-    elif total >= 22:
+    elif total >= 26:
         grade = "B"
-    elif total >= 15:
+    elif total >= 17:
         grade = "C"
-    elif total >= 8:
+    elif total >= 9:
         grade = "D"
     else:
         grade = "F"
 
-    lines.append(_box_line(f"  📊 总分: {total}/35  等级: {grade}", box_w))
+    lines.append(_box_line(f"  📊 总分: {total}/40  等级: {grade}", box_w))
 
     # ASCII radar-like visualization
     lines.append(_box_sep(box_w))

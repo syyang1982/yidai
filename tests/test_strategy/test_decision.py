@@ -207,7 +207,7 @@ class TestToMarkdown:
         assert "BUY" in md
         assert "1000" in md
         assert "30.5" in md
-        assert "27/35" in md
+        assert "27/40" in md
         assert "B" in md
         assert "SU7" in md
 

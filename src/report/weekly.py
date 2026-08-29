@@ -169,7 +169,7 @@ def _render_company_section(
     total = latest_score.get("total_score", 0)
     emoji = format_signal_emoji(signal)
     signal_cn = SIGNAL_CN.get(signal, signal)
-    lines.append(f"### {emoji} 信号: {signal_cn}  |  评级: {grade}  |  总分: {total}/35")
+    lines.append(f"### {emoji} 信号: {signal_cn}  |  评级: {grade}  |  总分: {total}/40")
     lines.append("")
 
     # 7-dimension scores with bars
@@ -291,7 +291,7 @@ def _render_portfolio_overview(all_scores: List[dict]) -> str:
     # Summary stats
     avg_score = sum(s.get("total_score", 0) for s in all_scores) / total_companies if total_companies > 0 else 0
     lines.append(f"**跟踪公司总数**: {total_companies}")
-    lines.append(f"**平均总分**: {avg_score:.1f}/35")
+    lines.append(f"**平均总分**: {avg_score:.1f}/40")
     lines.append("")
 
     return "\n".join(lines)

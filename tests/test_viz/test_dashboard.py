@@ -379,29 +379,29 @@ class TestRenderScoreRadar:
         result = render_score_radar(scores)
 
         assert "总分" in result
-        assert "26/35" in result  # 4+3+4+5+3+4+3 = 26
+        assert "26/40" in result  # 4+3+4+5+3+4+3 = 26
         assert "B" in result      # 26 is in B range (22-28)
 
     def test_all_zeros(self):
         """Radar chart handles all-zero scores."""
         scores = {k: 0 for k in [
             "profitability", "health", "cashflow",
-            "valuation", "growth", "ownership", "strategy",
+            "valuation", "growth", "dividend", "ownership", "strategy",
         ]}
         result = render_score_radar(scores)
 
-        assert "0/35" in result
+        assert "0/40" in result
         assert "F" in result
 
     def test_all_fives(self):
         """Radar chart handles perfect scores."""
         scores = {k: 5 for k in [
             "profitability", "health", "cashflow",
-            "valuation", "growth", "ownership", "strategy",
+            "valuation", "growth", "dividend", "ownership", "strategy",
         ]}
         result = render_score_radar(scores)
 
-        assert "35/35" in result
+        assert "40/40" in result
         assert "A" in result
 
     def test_empty_scores(self):
@@ -409,7 +409,7 @@ class TestRenderScoreRadar:
         scores = {}
         result = render_score_radar(scores)
 
-        assert "0/35" in result
+        assert "0/40" in result
         assert "F" in result
 
     def test_partial_scores(self):
@@ -418,7 +418,7 @@ class TestRenderScoreRadar:
         result = render_score_radar(scores)
 
         assert "盈利" in result
-        assert "7/35" in result  # 4+3+0+0+0+0+0 = 7
+        assert "7/40" in result  # 4+3+0+0+0+0+0+0 = 7
 
     def test_none_values(self):
         """Radar chart handles None values gracefully."""
@@ -428,30 +428,31 @@ class TestRenderScoreRadar:
             "cashflow": 3,
             "valuation": None,
             "growth": 2,
+            "dividend": None,
             "ownership": 1,
             "strategy": None,
         }
         result = render_score_radar(scores)
 
         # None values should be treated as 0
-        assert "10/35" in result  # 4+0+3+0+2+1+0 = 10
+        assert "10/40" in result  # 4+0+3+0+2+0+1+0 = 10
 
     def test_grade_thresholds(self):
         """Radar chart shows correct grades for different totals."""
-        # A grade: 29+
+        # A grade: 33+
         scores_a = {k: 5 for k in [
             "profitability", "health", "cashflow",
-            "valuation", "growth", "ownership", "strategy",
+            "valuation", "growth", "dividend", "ownership", "strategy",
         ]}
         assert "A" in render_score_radar(scores_a)
 
-        # C grade: 15-21
+        # C grade: 17-25
         scores_c = {
             "profitability": 3, "health": 2, "cashflow": 2,
-            "valuation": 2, "growth": 2, "ownership": 2, "strategy": 2,
+            "valuation": 2, "growth": 2, "dividend": 2, "ownership": 2, "strategy": 2,
         }
         result_c = render_score_radar(scores_c)
-        assert "15/35" in result_c
+        assert "17/40" in result_c
         assert "C" in result_c
 
     def test_score_clamping(self):
@@ -462,13 +463,14 @@ class TestRenderScoreRadar:
             "cashflow": 3,
             "valuation": 3,
             "growth": 3,
+            "dividend": 3,
             "ownership": 3,
             "strategy": 3,
         }
         result = render_score_radar(scores)
 
         # Should clamp: 5+0+3+3+3+3+3 = 20
-        assert "20/35" in result
+        assert "23/40" in result
 
     def test_box_characters(self):
         """Radar chart uses box-drawing characters."""

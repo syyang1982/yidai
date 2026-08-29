@@ -432,7 +432,7 @@ class ReviewEngine:
         ]
         if result.dimension_scores:
             parts = [f"{k}:{v}" for k, v in result.dimension_scores.items()]
-            lines.append(f"- **评分快照:** {' | '.join(parts)} ({result.total_score}/35, {result.grade})")
+            lines.append(f"- **评分快照:** {' | '.join(parts)} ({result.total_score}/40, {result.grade})")
         return "\n".join(lines)
 
     def format_dimension_report(self, effectiveness: List[DimensionEffectiveness]) -> str:

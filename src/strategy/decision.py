@@ -302,7 +302,7 @@ class DecisionLog:
             lines.append(f"- **催化剂:** {rec.catalyst}")
         if rec.risk_note:
             lines.append(f"- **风险:** {rec.risk_note}")
-        lines.append(f"- **评分:** {rec.total_score}/35 ({rec.grade}, 信号:{rec.signal})")
+        lines.append(f"- **评分:** {rec.total_score}/40 ({rec.grade}, 信号:{rec.signal})")
         if scores_str:
             lines.append(f"  - {scores_str}")
         if rec.portfolio_pct > 0:

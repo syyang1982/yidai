@@ -51,10 +51,10 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 
 _GRADE_THRESHOLDS = [
-    (29, "A"),
-    (22, "B"),
-    (15, "C"),
-    (8, "D"),
+    (33, "A"),
+    (26, "B"),
+    (17, "C"),
+    (9, "D"),
     (0, "F"),
 ]
 
@@ -103,7 +103,7 @@ def _render_signal_alerts(
             lines.append(
                 f"- {emoji} **{name}** ({ticker}) — {cn} "
                 f"({sig_date})  评级: {sig.get('grade', 'N/A')}  "
-                f"总分: {sig.get('total_score', 'N/A')}/35"
+                f"总分: {sig.get('total_score', 'N/A')}/40"
             )
         lines.append("")
 
@@ -312,7 +312,7 @@ def _render_action_items(
             next_g = info.get("next_grade", "")
             threshold = info.get("threshold", 0)
             lines.append(
-                f"  - {name} ({ticker}): {total}/35 → 距 {next_g} 仅差 {gap} 分 (需 {threshold})"
+                f"  - {name} ({ticker}): {total}/40 → 距 {next_g} 仅差 {gap} 分 (需 {threshold})"
             )
         lines.append("")
 

@@ -341,7 +341,7 @@ class SignalTracker:
             # 评分准确度
             expected_score = pred.get("expected_score", 0)
             actual_score = actual.get("actual_score", expected_score)
-            score_acc = max(0, 1 - abs(actual_score - expected_score) / 35)
+            score_acc = max(0, 1 - abs(actual_score - expected_score) / 40)
 
             # 方向准确度
             pred_direction = 1 if expected_price > (rec.get("company_state") and json.loads(rec["company_state"]).get("price", 0) or 0) else -1
