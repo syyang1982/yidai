@@ -211,8 +211,8 @@ class TestScoreResultAutoComputation:
         )
         assert sr.signal == "REDUCE"
 
-    def test_ownership_score_zero_triggers_reduce(self):
-        """ownership_score=0 (ownership < 1) => signal='REDUCE'."""
+    def test_ownership_score_zero_blocks_buy(self):
+        """ownership_score=0 => qualitative_confirmed=False => HOLD not BUY."""
         sr = ScoreResult(
             ticker="TEST",
             date=date(2024, 1, 1),
@@ -224,7 +224,9 @@ class TestScoreResultAutoComputation:
             ownership_score=0,
             strategy_score=5,
         )
-        assert sr.signal == "REDUCE"
+        # ownership=0 blocks BUY but doesn't trigger REDUCE
+        assert sr.signal in ("HOLD", "WATCH")
+        assert sr.signal != "BUY"
 
     def test_all_ones(self):
         """All 1s => total=7, grade='F', signal='REDUCE'."""

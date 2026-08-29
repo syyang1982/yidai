@@ -96,28 +96,39 @@ def _compute_grade(total: int) -> str:
 
 def _compute_signal(total: int, scores: dict) -> str:
     """Compute BUY / HOLD / WATCH / REDUCE signal from scores dict."""
-    prof = scores.get("\u76c8\u5229", 0)
-    health = scores.get("\u5065\u5eb7", 0)
-    cf = scores.get("\u73b0\u91d1\u6d41", 0)
-    val = scores.get("\u4f30\u503c", 0)
-    grow = scores.get("\u6210\u957f", 0)
-    div = scores.get("\u5206\u7ea2", 0)
-    own = scores.get("\u80a1\u4e1c", 0)
-    strat = scores.get("\u6218\u7565", 0)
-    all_scores = [prof, health, cf, val, grow, own, strat]
+    prof = scores.get("盈利", 0)
+    health = scores.get("健康", 0)
+    cf = scores.get("现金流", 0)
+    val = scores.get("估值", 0)
+    grow = scores.get("成长", 0)
+    div = scores.get("分红", 0)
+    own = scores.get("股东")
+    strat = scores.get("战略")
+    # Quantitative scores for critical check
+    quant_scores = [prof, health, cf, val, grow]
+    if div > 0:
+        quant_scores.append(div)
+    # Qualitative confirmation: must be explicitly set and >0
+    qualitative_confirmed = (
+        own is not None and strat is not None
+        and own > 0 and strat > 0
+    )
+    if own is None:
+        own = 0
+    if strat is None:
+        strat = 0
 
-    # Critical dimension failures
-    if health < 2 or cf < 2 or own < 1:
+    # Critical dimension failures (quantitative only)
+    if health < 2 or cf < 2:
         return "REDUCE"
     # Very low total (adjusted for 8-dim)
     if total <= 16:
         return "REDUCE"
-    # Any single dimension critically low
-    if any(s < 2 for s in all_scores):
+    # Any quantitative dimension critically low
+    if any(s < 2 for s in quant_scores):
         return "REDUCE"
-    # Strong buy signal (adjusted for 8-dim)
-    # 审计发现: 健康/成长高分有预测力，增加门槛排除quality trap
-    if total >= 33 and val >= 4 and health >= 3 and grow >= 3:
+    # Strong buy signal — requires qualitative confirmation
+    if total >= 33 and val >= 4 and health >= 3 and grow >= 3 and qualitative_confirmed:
         return "BUY"
     # Hold-worthy (adjusted for 8-dim)
     if total >= 17:

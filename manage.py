@@ -261,7 +261,7 @@ def _analyze_one(fetcher, kb, ticker, display, name, market, sector, thesis):
     except (FileNotFoundError, Exception):
         pass
 
-    def _get_qual(dim_cn, default=3):
+    def _get_qual(dim_cn, default=None):
         val = existing_scores.get(dim_cn)
         if val is not None:
             if isinstance(val, dict):
@@ -774,25 +774,26 @@ def cmd_decision(args):
                     "growth_drivers": [],
                 })
 
-                ownership_score = 3
-                strategy_score = 3
+                ownership_score = None
+                strategy_score = None
                 try:
                     kb_scores = profile.get("scores", {})
-                    ownership_score = kb_scores.get("股东", 3)
-                    strategy_score = kb_scores.get("战略", 3)
-                    if isinstance(ownership_score, dict): ownership_score = ownership_score.get("score", 3)
-                    if isinstance(strategy_score, dict): strategy_score = strategy_score.get("score", 3)
+                    ownership_score = kb_scores.get("股东")
+                    strategy_score = kb_scores.get("战略")
+                    if isinstance(ownership_score, dict): ownership_score = ownership_score.get("score")
+                    if isinstance(strategy_score, dict): strategy_score = strategy_score.get("score")
                 except Exception:
                     pass
 
                 scores = {
                     "盈利": prof, "健康": h, "现金流": cf,
-                    "估值": v, "成长": g, "股东": ownership_score, "战略": strategy_score,
+                    "估值": v, "成长": g, "股东": ownership_score or 0, "战略": strategy_score or 0,
                 }
                 total_score = sum(scores.values())
                 grade = _compute_grade(total_score)
-                signal = _compute_signal(total_score, prof, h, cf, v, g, ownership_score, strategy_score)
-                print(f"  📊 自动获取评分: {total_score}/35 ({grade}, {signal})")
+                signal = _compute_signal(total_score, prof, h, cf, v, g, ownership_score or 0, strategy_score or 0)
+                qual_flag = "✓" if ownership_score is not None and strategy_score is not None else "?"
+                print(f"  📊 自动获取评分: {total_score}/40 ({grade}, {signal}) 定性{qual_flag}")
         except Exception as e:
             print(f"  ⚠️ 无法自动获取评分: {e}")
 

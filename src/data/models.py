@@ -178,6 +178,7 @@ def _compute_signal(
     ownership: int,
     strategy: int,
     weighted_total: Optional[float] = None,
+    qualitative_confirmed: bool = True,
 ) -> str:
     """Determine BUY / HOLD / WATCH / REDUCE signal.
 
@@ -185,31 +186,37 @@ def _compute_signal(
       1. Critical failure -> REDUCE
          health < 2  OR  cashflow < 2  OR  ownership < 1
       2. Very low total -> REDUCE (total <= 16)
-      3. Any dim < 2 -> REDUCE
-      4. Strong + cheap -> BUY (weighted_total >= 33 AND dimension gates)
+      3. Any quant dim < 2 -> REDUCE (excludes ownership/strategy)
+      4. Strong + cheap + confirmed -> BUY
       5. Adequate -> HOLD (total >= 17)
       6. Otherwise -> WATCH
 
     weighted_total: if provided, uses dimension-weighted score for BUY threshold.
+    qualitative_confirmed: if False, blocks BUY (D7/D8 not manually scored).
     """
-    scores = [profitability, health, cashflow, valuation, growth, ownership, strategy]
+    # Quantitative dims only for critical check (exclude ownership/strategy)
+    # dividend=0 means "no data", not "bad" — exclude from critical check
+    quant_scores = [profitability, health, cashflow, valuation, growth]
+    if dividend > 0:
+        quant_scores.append(dividend)
 
-    # 1. Critical dimension failures
-    if health < 2 or cashflow < 2 or ownership < 1:
+    # 1. Critical dimension failures (quantitative only)
+    if health < 2 or cashflow < 2:
         return "REDUCE"
 
     # 2. Very low total
     if total <= 16:
         return "REDUCE"
 
-    # 3. Any single dimension critically low
-    if any(s < 2 for s in scores):
+    # 3. Any quantitative dimension critically low
+    if any(s < 2 for s in quant_scores):
         return "REDUCE"
 
-    # 4. Strong buy signal — use weighted_total if available
+    # 4. Strong buy signal — requires qualitative confirmation
     # 审计发现: 健康/估值/股东/战略有预测力, 盈利/现金流反预测力
     check_total = weighted_total if weighted_total is not None else total
-    if check_total >= 33 and valuation >= 4 and health >= 3 and growth >= 3:
+    if (check_total >= 33 and valuation >= 4 and health >= 3 and growth >= 3
+            and qualitative_confirmed):
         return "BUY"
 
     # 5. Hold-worthy
@@ -251,6 +258,9 @@ class ScoreResult:
     grade: str = field(init=False)
     signal: str = field(init=False)
 
+    # --- qualitative confirmation flag ---
+    qualitative_confirmed: bool = True
+
     def __post_init__(self) -> None:
         self.total_score = (
             self.profitability_score
@@ -280,4 +290,5 @@ class ScoreResult:
             self.ownership_score,
             self.strategy_score,
             weighted_total=self.weighted_total,
+            qualitative_confirmed=self.qualitative_confirmed,
         )

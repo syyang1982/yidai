@@ -344,8 +344,18 @@ def score_all(
     div_result = dividend_quality.score(div_input)
 
     # --- D7-D8 qualitative (human-provided) ---
-    ownership_score = qualitative_scores.get("ownership_score", 0)
-    strategy_score = qualitative_scores.get("strategy_score", 0)
+    ownership_score = qualitative_scores.get("ownership_score")
+    strategy_score = qualitative_scores.get("strategy_score")
+    # Check if qualitative scores were explicitly set (not None/default)
+    qualitative_confirmed = (
+        ownership_score is not None and strategy_score is not None
+        and ownership_score > 0 and strategy_score > 0
+    )
+    # Default to 0 for total computation if not set
+    if ownership_score is None:
+        ownership_score = 0
+    if strategy_score is None:
+        strategy_score = 0
 
     # --- Build ScoreResult (auto-computes total / grade / signal) ---
     sr = ScoreResult(
@@ -359,6 +369,7 @@ def score_all(
         dividend_score=div_result["score"],
         ownership_score=ownership_score,
         strategy_score=strategy_score,
+        qualitative_confirmed=qualitative_confirmed,
     )
 
     # Combine detail strings from all modules
