@@ -43,7 +43,7 @@ def engine_with_decisions():
         expected_price_12m=40.0,
         decision_date="2025-12-01",
     )
-    did1 = dl.record(rec1)
+    did1 = dl.record(rec1)["decision_id"]
 
     # Decision 2: BUY alibaba, expected 120 in 6m
     rec2 = DecisionRecord(
@@ -61,7 +61,7 @@ def engine_with_decisions():
         expected_price_12m=140.0,
         decision_date="2025-12-01",
     )
-    did2 = dl.record(rec2)
+    did2 = dl.record(rec2)["decision_id"]
 
     yield eng, dl, did1, did2
 
@@ -270,7 +270,7 @@ class TestPersistence:
                 expected_price_6m=35.0, decision_date="2025-12-01",
                 dimension_scores={"盈利": 4},
             )
-            did = dl1.record(rec)
+            did = dl1.record(rec)["decision_id"]
             eng1.review_decision(did, 33.0, "6m")
             eng1.conn.close()
 

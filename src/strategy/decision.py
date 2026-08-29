@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Dict, List, Optional
 
 import duckdb
@@ -121,8 +121,63 @@ class DecisionLog:
             )
         """)
 
-    def record(self, rec: DecisionRecord) -> str:
-        """记录一条决策。返回 decision_id。"""
+    def _check_constraints(self, rec: DecisionRecord) -> tuple[list, list]:
+        """返回 (warnings, violations)。warnings=软违规(仍记录), violations=硬违规(enforce时拒绝)。"""
+        warnings: list[str] = []
+        violations: list[str] = []
+
+        # 1. 单股仓位上限
+        if rec.portfolio_pct > 30:
+            violations.append(f"单股仓位 {rec.portfolio_pct:.1f}% > 30% 硬上限")
+        elif rec.portfolio_pct > 25:
+            warnings.append(f"单股仓位 {rec.portfolio_pct:.1f}% > 25% 软上限")
+
+        # 2. 连续买入同一标的检查(7天内重复买入)
+        if rec.action in ("BUY", "ADD") and rec.ticker:
+            date_val = rec.decision_date or date.today().isoformat()
+            try:
+                cutoff = (date.fromisoformat(date_val) - timedelta(days=7)).isoformat()
+            except ValueError:
+                cutoff = (date.today() - timedelta(days=7)).isoformat()
+            recent = self.conn.execute(
+                """SELECT COUNT(*) FROM decision_log
+                   WHERE ticker = ? AND action IN ('BUY', 'ADD')
+                   AND decision_date >= ?""",
+                [rec.ticker, cutoff],
+            ).fetchone()
+            if recent and recent[0] >= 3:
+                warnings.append(
+                    f"7天内第{recent[0]+1}次买入{rec.ticker}，注意过度交易"
+                )
+
+        return warnings, violations
+
+    def record(
+        self, rec: DecisionRecord, enforce_constraints: bool = True
+    ) -> dict:
+        """记录一条决策。返回 {decision_id, warnings, violations, accepted}。
+
+        Args:
+            rec: DecisionRecord
+            enforce_constraints: if True, reject if hard constraints violated
+
+        Returns:
+            dict with:
+                - decision_id: str (empty if rejected)
+                - warnings: list of str (soft violations, still recorded)
+                - violations: list of str (hard violations, rejected if enforce)
+                - accepted: bool
+        """
+        warnings, violations = self._check_constraints(rec)
+
+        if enforce_constraints and violations:
+            return {
+                "decision_id": "",
+                "warnings": warnings,
+                "violations": violations,
+                "accepted": False,
+            }
+
         now = datetime.now().isoformat()
         if not rec.decision_id:
             rec.decision_id = str(uuid.uuid4())[:8]
@@ -156,12 +211,17 @@ class DecisionLog:
                 rec.created_at, rec.updated_at,
             ],
         )
-        return rec.decision_id
+        return {
+            "decision_id": rec.decision_id,
+            "warnings": warnings,
+            "violations": violations,
+            "accepted": True,
+        }
 
     def get(self, decision_id: str) -> Optional[DecisionRecord]:
         """获取单条决策记录。"""
         row = self.conn.execute(
-            "SELECT * FROM decision_log WHERE decision_id = ?",
+            'SELECT * FROM decision_log WHERE decision_id = ?',
             [decision_id],
         ).fetchone()
         if not row:

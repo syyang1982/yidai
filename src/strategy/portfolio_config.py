@@ -43,20 +43,20 @@ def get_default_constraints() -> PortfolioConstraints:
 def create_sample_holdings() -> List[dict]:
     """Return sample holdings data for testing.
 
-    Total ≈ HK$1,000,000 with Xiaomi as the largest position (~60%).
+    Total ≈ HK$1,000,000 with Xiaomi as the largest position (~20%).
     """
     return [
-        {"ticker": "01810.HK", "name": "小米集团", "value_hkd": 600_000, "sector": "科技", "market": "港股"},
-        {"ticker": "3896.HK",  "name": "金山云",   "value_hkd": 60_000,  "sector": "科技", "market": "港股"},
-        {"ticker": "3888.HK",  "name": "金山软件", "value_hkd": 50_000,  "sector": "科技", "market": "港股"},
-        {"ticker": "09988.HK", "name": "阿里巴巴", "value_hkd": 80_000,  "sector": "科技", "market": "港股"},
-        {"ticker": "9896.HK",  "name": "名创优品", "value_hkd": 30_000,  "sector": "消费", "market": "港股"},
-        {"ticker": "9626.HK",  "name": "B站",      "value_hkd": 15_000,  "sector": "科技", "market": "港股"},
-        {"ticker": "9999.HK",  "name": "网易",     "value_hkd": 20_000,  "sector": "科技", "market": "港股"},
-        {"ticker": "2020.HK",  "name": "安踏体育", "value_hkd": 25_000,  "sector": "消费", "market": "港股"},
-        {"ticker": "2252.HK",  "name": "微创机器人", "value_hkd": 15_000, "sector": "医疗", "market": "港股"},
-        {"ticker": "2498.HK",  "name": "速腾聚创", "value_hkd": 10_000,  "sector": "科技", "market": "港股"},
-        {"ticker": "1361.HK",  "name": "361度",    "value_hkd": 20_000,  "sector": "消费", "market": "港股"},
-        {"ticker": "LX",       "name": "乐信",     "value_hkd": 40_000,  "sector": "金融", "market": "美股"},
-        {"ticker": "SGP.ASX",  "name": "Stockland","value_hkd": 35_000,  "sector": "地产", "market": "澳洲"},
+        {"ticker": "01810.HK", "name": "小米集团", "value_hkd": 200_000, "sector": "科技", "market": "港股"},
+        {"ticker": "3896.HK",  "name": "金山云",   "value_hkd": 70_000,  "sector": "科技", "market": "港股"},
+        {"ticker": "3888.HK",  "name": "金山软件", "value_hkd": 60_000,  "sector": "科技", "market": "港股"},
+        {"ticker": "09988.HK", "name": "阿里巴巴", "value_hkd": 120_000, "sector": "科技", "market": "港股"},
+        {"ticker": "9896.HK",  "name": "名创优品", "value_hkd": 50_000,  "sector": "消费", "market": "港股"},
+        {"ticker": "9626.HK",  "name": "B站",      "value_hkd": 40_000,  "sector": "科技", "market": "港股"},
+        {"ticker": "9999.HK",  "name": "网易",     "value_hkd": 60_000,  "sector": "科技", "market": "港股"},
+        {"ticker": "2020.HK",  "name": "安踏体育", "value_hkd": 65_000,  "sector": "消费", "market": "港股"},
+        {"ticker": "2252.HK",  "name": "微创机器人", "value_hkd": 55_000, "sector": "医疗", "market": "港股"},
+        {"ticker": "2498.HK",  "name": "速腾聚创", "value_hkd": 45_000,  "sector": "科技", "market": "港股"},
+        {"ticker": "1361.HK",  "name": "361度",    "value_hkd": 60_000,  "sector": "消费", "market": "港股"},
+        {"ticker": "LX",       "name": "乐信",     "value_hkd": 110_000, "sector": "金融", "market": "美股"},
+        {"ticker": "SGP.ASX",  "name": "Stockland","value_hkd": 65_000,  "sector": "地产", "market": "澳洲"},
     ]

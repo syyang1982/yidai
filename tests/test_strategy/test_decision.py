@@ -52,21 +52,24 @@ class TestDecisionRecord:
 
     def test_amount_auto_calc(self, log, sample_record):
         """amount should auto-calculate from shares * price."""
-        did = log.record(sample_record)
+        result = log.record(sample_record)
+        did = result["decision_id"]
         rec = log.get(did)
         assert rec.amount == 1000 * 30.5
 
     def test_explicit_amount_preserved(self, log, sample_record):
         """Explicit amount should not be overwritten."""
         sample_record.amount = 99999
-        did = log.record(sample_record)
+        result = log.record(sample_record)
+        did = result["decision_id"]
         rec = log.get(did)
         assert rec.amount == 99999
 
 
 class TestDecisionLog:
     def test_record_and_get(self, log, sample_record):
-        did = log.record(sample_record)
+        result = log.record(sample_record)
+        did = result["decision_id"]
         assert did is not None and len(did) == 8
 
         rec = log.get(did)
@@ -83,13 +86,13 @@ class TestDecisionLog:
 
     def test_record_generates_id(self, log, sample_record):
         sample_record.decision_id = ""
-        did = log.record(sample_record)
-        assert len(did) == 8
+        result = log.record(sample_record)
+        assert len(result["decision_id"]) == 8
 
     def test_record_preserves_id(self, log, sample_record):
         sample_record.decision_id = "custom-id"
-        did = log.record(sample_record)
-        assert did == "custom-id"
+        result = log.record(sample_record)
+        assert result["decision_id"] == "custom-id"
 
     def test_get_nonexistent(self, log):
         assert log.get("nonexistent") is None
@@ -145,7 +148,7 @@ class TestDecisionLog:
 
 class TestRecordOutcome:
     def test_record_6m_outcome(self, log, sample_record):
-        did = log.record(sample_record)
+        did = log.record(sample_record)["decision_id"]
         log.record_outcome(did, actual_price=35.0, period="6m", review_notes="符合预期")
         rec = log.get(did)
         assert rec.actual_price_6m == 35.0
@@ -153,7 +156,7 @@ class TestRecordOutcome:
         assert rec.status == "reviewed_6m"
 
     def test_record_12m_outcome_with_return(self, log, sample_record):
-        did = log.record(sample_record)
+        did = log.record(sample_record)["decision_id"]
         log.record_outcome(
             did, actual_price=40.0, period="12m",
             review_notes="超预期", lessons="估值容忍度可以更高",
@@ -198,7 +201,7 @@ class TestStats:
 
 class TestToMarkdown:
     def test_basic_markdown(self, log, sample_record):
-        did = log.record(sample_record)
+        did = log.record(sample_record)["decision_id"]
         rec = log.get(did)
         md = log.to_markdown(rec)
 
@@ -212,7 +215,7 @@ class TestToMarkdown:
         assert "SU7" in md
 
     def test_markdown_with_outcome(self, log, sample_record):
-        did = log.record(sample_record)
+        did = log.record(sample_record)["decision_id"]
         log.record_outcome(did, 35.0, "6m", "符合预期")
         rec = log.get(did)
         md = log.to_markdown(rec)
@@ -226,7 +229,7 @@ class TestPersistence:
         path = tempfile.mktemp(suffix=".duckdb")
         try:
             log1 = DecisionLog(path)
-            did = log1.record(sample_record)
+            did = log1.record(sample_record)["decision_id"]
             log1.conn.close()
 
             log2 = DecisionLog(path)
@@ -250,7 +253,7 @@ class TestEdgeCases:
             reason="维持现有仓位",
             decision_date="2026-06-01",
         )
-        did = log.record(rec)
+        did = log.record(rec)["decision_id"]
         saved = log.get(did)
         assert saved.action == "HOLD"
         assert saved.shares == 0
@@ -266,7 +269,7 @@ class TestEdgeCases:
             reason="减仓锁定利润",
             decision_date="2026-06-01",
         )
-        did = log.record(rec)
+        did = log.record(rec)["decision_id"]
         saved = log.get(did)
         assert saved.action == "REDUCE"
         assert saved.amount == 2000 * 33.0
@@ -280,7 +283,116 @@ class TestEdgeCases:
             reason="观望",
             decision_date="2026-06-01",
         )
-        did = log.record(rec)
+        did = log.record(rec)["decision_id"]
         saved = log.get(did)
         assert saved.dimension_scores == {}
         assert saved.total_score == 0
+
+
+# ── Constraint check tests ────────────────────────────────────────
+
+class TestRecordConstraints:
+    """Tests for DecisionLog.record() constraint enforcement."""
+
+    def test_record_rejects_over_limit(self, log, sample_record):
+        """portfolio_pct > 30% should be rejected (hard violation)."""
+        sample_record.portfolio_pct = 35.0
+        result = log.record(sample_record, enforce_constraints=True)
+        assert result["accepted"] is False
+        assert result["decision_id"] == ""
+        assert len(result["violations"]) == 1
+        assert "30%" in result["violations"][0]
+
+    def test_record_warns_near_limit(self, log, sample_record):
+        """portfolio_pct 25-30% should warn but still accept."""
+        sample_record.portfolio_pct = 28.0
+        result = log.record(sample_record, enforce_constraints=True)
+        assert result["accepted"] is True
+        assert result["decision_id"] != ""
+        assert len(result["warnings"]) == 1
+        assert "25%" in result["warnings"][0]
+        assert len(result["violations"]) == 0
+
+    def test_record_accepts_normal(self, log, sample_record):
+        """Normal portfolio_pct should pass without warnings."""
+        sample_record.portfolio_pct = 20.0
+        result = log.record(sample_record, enforce_constraints=True)
+        assert result["accepted"] is True
+        assert result["decision_id"] != ""
+        assert result["warnings"] == []
+        assert result["violations"] == []
+
+    def test_record_warns_frequent_buy(self, log, sample_record):
+        """7天内3+次买入 should trigger a warning."""
+        # Insert 3 prior BUY records for the same ticker within 7 days
+        for i in range(3):
+            rec = DecisionRecord(
+                ticker="01810.HK",
+                company_name="小米集团",
+                action="BUY",
+                shares=100,
+                price=30.0,
+                decision_date="2026-06-01",
+                portfolio_pct=5.0,
+            )
+            log.record(rec, enforce_constraints=False)
+
+        # Now a 4th buy — should warn about overtrading
+        sample_record.decision_date = "2026-06-03"
+        sample_record.portfolio_pct = 5.0
+        result = log.record(sample_record, enforce_constraints=True)
+        assert result["accepted"] is True  # warning, not violation
+        assert any("过度交易" in w for w in result["warnings"])
+
+    def test_record_no_constraint_check_when_disabled(self, log, sample_record):
+        """enforce_constraints=False should accept even hard violations."""
+        sample_record.portfolio_pct = 99.0
+        result = log.record(sample_record, enforce_constraints=False)
+        assert result["accepted"] is True
+        assert len(result["decision_id"]) == 8
+        # Still reports violations in the result
+        assert len(result["violations"]) == 1
+
+    def test_record_sell_no_frequent_buy_check(self, log, sample_record):
+        """SELL actions should not trigger frequent-buy warning."""
+        for i in range(5):
+            rec = DecisionRecord(
+                ticker="01810.HK",
+                company_name="小米集团",
+                action="SELL",
+                shares=100,
+                price=30.0,
+                decision_date="2026-06-01",
+                portfolio_pct=5.0,
+            )
+            log.record(rec, enforce_constraints=False)
+
+        sample_record.action = "SELL"
+        sample_record.decision_date = "2026-06-03"
+        sample_record.portfolio_pct = 5.0
+        result = log.record(sample_record, enforce_constraints=True)
+        assert result["accepted"] is True
+        assert not any("过度交易" in w for w in result["warnings"])
+
+    def test_record_combined_violation_and_warning(self, log, sample_record):
+        """Both hard violation and soft warning can coexist."""
+        # 3 prior buys to trigger frequent-buy warning
+        for i in range(3):
+            rec = DecisionRecord(
+                ticker="01810.HK",
+                company_name="小米集团",
+                action="BUY",
+                shares=100,
+                price=30.0,
+                decision_date="2026-06-01",
+                portfolio_pct=5.0,
+            )
+            log.record(rec, enforce_constraints=False)
+
+        # New buy with hard violation (portfolio_pct > 30)
+        sample_record.decision_date = "2026-06-03"
+        sample_record.portfolio_pct = 35.0
+        result = log.record(sample_record, enforce_constraints=True)
+        assert result["accepted"] is False
+        assert len(result["violations"]) == 1
+        assert any("过度交易" in w for w in result["warnings"])
