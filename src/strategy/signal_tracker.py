@@ -102,7 +102,8 @@ class SignalTracker:
                 system_improvement VARCHAR,
                 status VARCHAR,
                 created_at TIMESTAMP,
-                updated_at TIMESTAMP
+                updated_at TIMESTAMP,
+                time_window_prices JSON
             )
         """)
 
