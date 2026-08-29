@@ -7,7 +7,8 @@ Checks:
   4. EV/EBITDA reasonableness (if available)
   5. Peer PE comparison (if available) — is the company cheaper or more expensive
      than the industry median?
-  6. Insider activity advisory (if data provided) — ⚠️ warning only, does NOT
+  6. PS (Price-to-Sales) ratio — for B2B/SaaS/亏损公司 when PE is unavailable
+  7. Insider activity advisory (if data provided) — ⚠️ warning only, does NOT
      affect score. Flags 大股东/高管减持 and 增发/配股 as potential short-term
      valuation peak signals.
 
@@ -16,6 +17,19 @@ Growth company handling:
   - Growth companies with PE < 0: SKIP (expected — investing in growth)
   - Growth companies with PE > 100: use PEG with relaxed threshold (PEG < 3)
   - Non-growth companies: strict PE checks as before
+
+B2B/SaaS industry handling:
+  - Companies in B2B industries (cloud, saas, semiconductor, software, biotech)
+    or with data["is_b2b"]=True are treated as B2B companies.
+  - B2B companies with PE unavailable: SKIP PE checks, use PS as primary metric.
+  - B2B companies with PE available: use both PE and PS checks.
+
+PS ratio benchmarks (Check 6):
+  - < 3: attractive (PASS)
+  - 3-6: reasonable (PASS)
+  - 6-10: expensive but acceptable for growth (conditional PASS)
+  - >= 10: overvalued (FAIL)
+  - < 0: SKIP (invalid data)
 
 EV/EBITDA benchmarks:
   - < 10: attractive (PASS)
@@ -34,14 +48,18 @@ Peer PE comparison (Check 5):
 Scoring: all pass=5, 1 fail=4, 2 fail=3, all fail=1
 """
 
+# B2B/SaaS industries where PE may be unreliable — PS is often more meaningful
+B2B_INDUSTRIES = {"cloud", "saas", "semiconductor", "software", "biotech"}
+
 
 def score(data: dict) -> dict:
-    """Score valuation with growth-aware PE assessment and EV/EBITDA.
+    """Score valuation with growth-aware PE assessment, EV/EBITDA, and PS.
 
     Args:
         data: dict with keys 'pe_ratio', 'pe_history_percentile',
               'revenue_growth_rate' (as percentage, e.g. 25 for 25%),
-              'ev_to_ebitda', 'ebitda', 'market_cap'
+              'ev_to_ebitda', 'ebitda', 'market_cap', 'peer_median_pe',
+              'ps_ratio' (optional), 'industry' (optional), 'is_b2b' (optional)
 
     Returns:
         dict with 'score' (int 0-5) and 'details' (list of str)
@@ -54,10 +72,16 @@ def score(data: dict) -> dict:
     rev_growth = data.get("revenue_growth_rate", 0)  # percentage
     is_growth = rev_growth > 15  # >15% revenue growth = growth company
 
+    # B2B / SaaS industry detection
+    industry = data.get("industry", "").lower()
+    is_b2b = industry in B2B_INDUSTRIES or data.get("is_b2b", False)
+
     if is_growth:
         details.append(f"company type: growth (revenue +{rev_growth:.1f}%)")
+    if is_b2b:
+        details.append(f"company type: B2B/SaaS (industry={industry or 'flagged'})")
 
-    # Check 1: PE reasonableness (growth-aware)
+    # Check 1: PE reasonableness (growth-aware, B2B-aware)
     if pe_ratio is not None:
         total_checks += 1
         if pe_ratio <= 0:
@@ -81,6 +105,8 @@ def score(data: dict) -> dict:
                     details.append(f"pe_ratio: {pe_ratio:.2f} >= 100, PEG={peg:.2f} >= 3 - FAIL")
             else:
                 details.append(f"pe_ratio: {pe_ratio:.2f} >= 100 (非成长型) - FAIL")
+    elif is_b2b:
+        details.append("pe_ratio: missing (B2B company) - SKIP (will use PS)")
     else:
         details.append("pe_ratio: missing - SKIP")
 
@@ -159,6 +185,30 @@ def score(data: dict) -> dict:
         details.append("peer_pe: data available but PE missing or <= 0 - SKIP")
     else:
         details.append("peer_pe: no peer data provided - SKIP")
+
+    # Check 6: PS (Price-to-Sales) — for B2B/SaaS/亏损公司
+    ps_ratio = data.get("ps_ratio")
+    if ps_ratio is not None:
+        total_checks += 1
+        if ps_ratio < 0:
+            details.append(f"ps_ratio: {ps_ratio:.2f} < 0 - SKIP")
+            total_checks -= 1
+        elif ps_ratio < 3:
+            details.append(f"ps_ratio: {ps_ratio:.2f} < 3x (有吸引力) - PASS")
+            checks_passed += 1
+        elif ps_ratio < 6:
+            details.append(f"ps_ratio: {ps_ratio:.2f} in [3, 6) (合理) - PASS")
+            checks_passed += 1
+        elif ps_ratio < 10:
+            if is_growth:
+                details.append(f"ps_ratio: {ps_ratio:.2f} in [6, 10) (偏贵但成长型可接受) - PASS")
+                checks_passed += 1
+            else:
+                details.append(f"ps_ratio: {ps_ratio:.2f} in [6, 10) (偏贵) - FAIL")
+        else:
+            details.append(f"ps_ratio: {ps_ratio:.2f} >= 10x (高估) - FAIL")
+    else:
+        details.append("ps_ratio: not provided - SKIP")
 
     # Avoid division by zero
     if total_checks == 0:

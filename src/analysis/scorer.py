@@ -180,6 +180,8 @@ def _build_valuation_data(financial_data: dict, price_data: dict,
         "ev_to_ebitda": ev_to_ebitda,
         "market_cap": market_cap,
         "peer_median_pe": peer_median_pe,
+        "ps_ratio": price_data.get("ps_ratio"),  # for B2B/SaaS valuation
+        "industry": financial_data.get("industry", ""),  # for B2B detection
     }
 
 
@@ -214,6 +216,9 @@ def _build_growth_data(financial_data: dict,
         "growth_drivers": [],  # not available from API
         "roe_rates": roe_rates,
         "gross_margin_rates": gm_rates,
+        "growth_type": "yoy",  # annual data → year-over-year
+        "latest_roe": roe_rates[-1] if roe_rates else None,
+        "payout_ratio": financial_data.get("payout_ratio"),
     }
 
 

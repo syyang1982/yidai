@@ -116,24 +116,57 @@ def _assess_stability(rates: list[float], label: str,
     return result
 
 
+def _sustainable_growth(roe: float | None, payout_ratio: float | None) -> float | None:
+    """Sustainable growth rate = ROE × (1 - payout ratio).
+
+    This is the maximum growth a company can sustain using only retained
+    earnings.  If actual growth exceeds this, the company relies on
+    external financing (debt or equity issuance).
+
+    Args:
+        roe: return on equity (e.g. 0.15 for 15%)
+        payout_ratio: dividend payout ratio (e.g. 0.30 for 30%)
+
+    Returns:
+        sustainable growth rate, or None if inputs are missing.
+    """
+    if roe is None or payout_ratio is None:
+        return None
+    return roe * (1 - payout_ratio)
+
+
 def score(data: dict) -> dict:
     """Score growth based on revenue growth trends and long-term averages.
 
     Args:
         data: dict with keys:
-            'revenue_growth_rates' (list of float) — YoY rates
+            'revenue_growth_rates' (list of float) — YoY or QoQ rates
+            'growth_type' (str, optional) — 'yoy' (default) or 'qoq'
             'growth_drivers' (list of str, optional)
             'roe_rates' (list of float, optional) — multi-year ROE
             'gross_margin_rates' (list of float, optional) — multi-year gross margins
+            'latest_roe' (float, optional) — most recent ROE
+            'payout_ratio' (float, optional) — dividend payout ratio
 
     Returns:
         dict with 'score' (int 0-5) and 'details' (list of str)
     """
     details = []
     growth_rates = data.get("revenue_growth_rates", [])
+    growth_type = data.get("growth_type", "yoy")
     drivers = data.get("growth_drivers", [])
     roe_rates = data.get("roe_rates", [])
     gm_rates = data.get("gross_margin_rates", [])
+
+    # QoQ → annualized conversion
+    if growth_type == "qoq" and growth_rates:
+        # QoQ转年化: (1+qoq)^4 - 1
+        annualized = [(1 + r) ** 4 - 1 for r in growth_rates]
+        details.append(
+            f"QoQ data detected, annualized: "
+            f"{[f'{r:.1%}' for r in annualized[:3]]}..."
+        )
+        growth_rates = annualized
 
     if not growth_rates:
         details.append("growth: no multi-period data available - score 3 (neutral)")
@@ -259,6 +292,23 @@ def score(data: dict) -> dict:
     else:
         details.append("5yr avg 毛利率: insufficient data - SKIP")
         gm_quality = "skip"
+
+    # Check 7: sustainable growth rate cross-validation
+    roe_latest = data.get("latest_roe")
+    payout = data.get("payout_ratio")
+    sust_growth = _sustainable_growth(roe_latest, payout)
+    if sust_growth is not None and latest_rate > 0:
+        if latest_rate > sust_growth * 1.5:
+            details.append(
+                f"sustainable_growth: 实际{latest_rate:.1%} > "
+                f"可持续{sust_growth:.1%}×1.5 (依赖外部融资) - WARN"
+            )
+            # Warning only — does not affect score
+        elif latest_rate <= sust_growth:
+            details.append(
+                f"sustainable_growth: 实际{latest_rate:.1%} <= "
+                f"可持续{sust_growth:.1%} (内生增长) - PASS"
+            )
 
     # Determine final score
     base_score = {

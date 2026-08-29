@@ -161,3 +161,104 @@ class TestGrowthEdgeCases:
         assert "N/A" in trend_detail
         # 1 period positive, no one-time => strong + single => score=5
         assert result["score"] == 5
+
+
+class TestQoQAnnualization:
+    """QoQ growth rates should be annualized before scoring."""
+
+    def test_qoq_to_annualized(self):
+        """QoQ 5% => annualized ~21.55%."""
+        data = {
+            "revenue_growth_rates": [0.05, 0.05, 0.05],
+            "growth_type": "qoq",
+        }
+        result = score(data)
+        details_text = " ".join(result["details"])
+        # (1+0.05)^4 - 1 = 0.21550625
+        assert "QoQ data detected" in details_text
+        # latest_rate after annualization should be ~21.6%
+        assert "21.6%" in details_text
+
+    def test_annualized_growth_used_for_scoring(self):
+        """QoQ data should be annualized and affect scoring like YoY data."""
+        data = {
+            "revenue_growth_rates": [0.05, 0.04, 0.03],
+            "growth_type": "qoq",
+        }
+        result = score(data)
+        # Annualized: ~21.5%, ~17.0%, ~12.6% — all strong, but declining
+        # latest strong + weak trend => base=3
+        details_text = " ".join(result["details"])
+        assert "QoQ data detected" in details_text
+        assert result["score"] >= 2  # should not be neutral
+
+    def test_yoy_default_unchanged(self):
+        """YoY data (default) should not be annualized."""
+        data = {
+            "revenue_growth_rates": [0.10, 0.15, 0.20],
+            "growth_drivers": ["organic growth"],
+        }
+        result = score(data)
+        details_text = " ".join(result["details"])
+        assert "QoQ" not in details_text
+        assert result["score"] == 5  # unchanged from existing test
+
+
+class TestSustainableGrowth:
+    """Check 7: sustainable growth rate cross-validation."""
+
+    def test_sustainable_growth_pass(self):
+        """Actual growth <= sustainable growth => PASS."""
+        from analysis.growth import _sustainable_growth
+
+        # ROE=15%, payout=30% => sustainable = 10.5%
+        sust = _sustainable_growth(0.15, 0.30)
+        assert abs(sust - 0.105) < 1e-9
+
+        data = {
+            "revenue_growth_rates": [0.10, 0.10, 0.10],
+            "latest_roe": 0.15,
+            "payout_ratio": 0.30,
+        }
+        result = score(data)
+        details_text = " ".join(result["details"])
+        assert "sustainable_growth" in details_text
+        assert "PASS" in details_text
+
+    def test_actual_exceeds_sustainable_warn(self):
+        """Actual growth > 1.5× sustainable => WARN."""
+        # ROE=15%, payout=30% => sustainable=10.5%
+        # Actual latest ~20% > 15.75% (1.5×) => WARN
+        data = {
+            "revenue_growth_rates": [0.15, 0.18, 0.20],
+            "latest_roe": 0.15,
+            "payout_ratio": 0.30,
+        }
+        result = score(data)
+        details_text = " ".join(result["details"])
+        assert "WARN" in details_text
+        assert "依赖外部融资" in details_text
+
+    def test_sustainable_growth_none_when_missing(self):
+        """No ROE/payout data => Check 7 is skipped silently."""
+        data = {
+            "revenue_growth_rates": [0.10, 0.15, 0.20],
+            "growth_drivers": ["organic growth"],
+        }
+        result = score(data)
+        details_text = " ".join(result["details"])
+        assert "sustainable_growth" not in details_text
+        # Score should be same as before (no regression)
+        assert result["score"] == 5
+
+    def test_sustainable_growth_calculation(self):
+        """Pure unit test for _sustainable_growth helper."""
+        from analysis.growth import _sustainable_growth
+
+        # ROE=20%, payout=40% => 12%
+        assert abs(_sustainable_growth(0.20, 0.40) - 0.12) < 1e-9
+        # ROE=100%, payout=0% => 100%
+        assert abs(_sustainable_growth(1.0, 0.0) - 1.0) < 1e-9
+        # Missing inputs => None
+        assert _sustainable_growth(None, 0.30) is None
+        assert _sustainable_growth(0.15, None) is None

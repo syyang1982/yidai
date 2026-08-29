@@ -35,9 +35,9 @@ class TestValuationAllPass:
         pass_details = [d for d in result["details"] if "PASS" in d]
         skip_details = [d for d in result["details"] if "SKIP" in d]
         assert len(pass_details) == 2  # PE PASS + percentile PASS
-        assert len(skip_details) == 3  # PEG SKIP + EV/EBITDA SKIP + peer_pe SKIP
-        # 1 company type + 2 PASS + 3 SKIP = 6
-        assert len(result["details"]) == 6
+        assert len(skip_details) == 4  # PEG SKIP + EV/EBITDA SKIP + peer_pe SKIP + ps_ratio SKIP
+        # 1 company type + 2 PASS + 4 SKIP = 7
+        assert len(result["details"]) == 7
 
     def test_peg_value_correct(self):
         data = {
@@ -145,7 +145,7 @@ class TestValuationPercentileNone:
         result = score(data)
         skip_count = sum(1 for d in result["details"] if "SKIP" in d)
         pass_count = sum(1 for d in result["details"] if "PASS" in d)
-        assert skip_count == 4  # percentile SKIP + PEG SKIP + EV/EBITDA SKIP + peer_pe SKIP
+        assert skip_count == 5  # percentile SKIP + PEG SKIP + EV/EBITDA SKIP + peer_pe SKIP + ps_ratio SKIP
         assert pass_count == 1  # only PE PASS (PE=16 < 100)
 
 
@@ -213,3 +213,197 @@ class TestValuationPeerComparison:
         result = score(data)
         peer_detail = [d for d in result["details"] if "peer_pe" in d][0]
         assert "SKIP" in peer_detail
+
+
+class TestPSRatio:
+    """Test PS (Price-to-Sales) ratio check (Check 6)."""
+
+    def test_ps_pass_attractive(self):
+        """PS < 3 => PASS (有吸引力)."""
+        data = {
+            "pe_ratio": 16,
+            "pe_history_percentile": 0.35,
+            "revenue_growth_rate": 10,
+            "ps_ratio": 2.5,
+        }
+        result = score(data)
+        ps_detail = [d for d in result["details"] if "ps_ratio" in d][0]
+        assert "PASS" in ps_detail
+        assert "有吸引力" in ps_detail
+
+    def test_ps_pass_reasonable(self):
+        """PS in [3, 6) => PASS (合理)."""
+        data = {
+            "pe_ratio": 16,
+            "pe_history_percentile": 0.35,
+            "revenue_growth_rate": 10,
+            "ps_ratio": 4.5,
+        }
+        result = score(data)
+        ps_detail = [d for d in result["details"] if "ps_ratio" in d][0]
+        assert "PASS" in ps_detail
+        assert "合理" in ps_detail
+
+    def test_ps_pass_growth_expensive(self):
+        """PS in [6, 10) + growth => PASS (偏贵但成长型可接受)."""
+        data = {
+            "pe_ratio": 16,
+            "pe_history_percentile": 0.35,
+            "revenue_growth_rate": 25,  # growth company
+            "ps_ratio": 8.0,
+        }
+        result = score(data)
+        ps_detail = [d for d in result["details"] if "ps_ratio" in d][0]
+        assert "PASS" in ps_detail
+        assert "成长型可接受" in ps_detail
+
+    def test_ps_fail_non_growth_expensive(self):
+        """PS in [6, 10) + non-growth => FAIL."""
+        data = {
+            "pe_ratio": 16,
+            "pe_history_percentile": 0.35,
+            "revenue_growth_rate": 5,  # not growth
+            "ps_ratio": 8.0,
+        }
+        result = score(data)
+        ps_detail = [d for d in result["details"] if "ps_ratio" in d][0]
+        assert "FAIL" in ps_detail
+        assert "偏贵" in ps_detail
+
+    def test_ps_fail_high(self):
+        """PS >= 10 => FAIL (高估)."""
+        data = {
+            "pe_ratio": 16,
+            "pe_history_percentile": 0.35,
+            "revenue_growth_rate": 10,
+            "ps_ratio": 15.0,
+        }
+        result = score(data)
+        ps_detail = [d for d in result["details"] if "ps_ratio" in d][0]
+        assert "FAIL" in ps_detail
+        assert "高估" in ps_detail
+
+    def test_ps_skip_negative(self):
+        """PS < 0 => SKIP (invalid data)."""
+        data = {
+            "pe_ratio": 16,
+            "pe_history_percentile": 0.35,
+            "revenue_growth_rate": 10,
+            "ps_ratio": -1.5,
+        }
+        result = score(data)
+        ps_detail = [d for d in result["details"] if "ps_ratio" in d][0]
+        assert "SKIP" in ps_detail
+
+    def test_ps_skip_not_provided(self):
+        """No ps_ratio => SKIP."""
+        data = {
+            "pe_ratio": 16,
+            "pe_history_percentile": 0.35,
+            "revenue_growth_rate": 10,
+        }
+        result = score(data)
+        ps_detail = [d for d in result["details"] if "ps_ratio" in d][0]
+        assert "SKIP" in ps_detail
+
+
+class TestB2BCompany:
+    """Test B2B/SaaS industry awareness."""
+
+    def test_b2b_uses_ps_when_pe_unavailable(self):
+        """B2B company with PE unavailable: skips PE checks, uses PS."""
+        data = {
+            "pe_ratio": None,
+            "pe_history_percentile": None,
+            "revenue_growth_rate": 20,  # growth company
+            "ps_ratio": 4.0,
+            "industry": "saas",
+        }
+        result = score(data)
+        # PE should be SKIP with B2B note
+        pe_detail = [d for d in result["details"] if "pe_ratio" in d and "missing" in d.lower()][0]
+        assert "B2B" in pe_detail
+        assert "SKIP" in pe_detail
+        # PS should be evaluated and PASS
+        ps_detail = [d for d in result["details"] if "ps_ratio" in d][0]
+        assert "PASS" in ps_detail
+        # B2B type should be noted
+        b2b_detail = [d for d in result["details"] if "B2B" in d][0]
+        assert "saas" in b2b_detail
+
+    def test_b2b_pe_available_uses_both(self):
+        """B2B company with PE available: uses both PE and PS checks."""
+        data = {
+            "pe_ratio": -5,  # negative PE (unprofitable)
+            "pe_history_percentile": None,
+            "revenue_growth_rate": 30,  # growth company
+            "ps_ratio": 5.0,
+            "industry": "cloud",
+        }
+        result = score(data)
+        # PE <= 0 but growth: SKIP (not a failure)
+        pe_detail = [d for d in result["details"] if "pe_ratio" in d][0]
+        assert "SKIP" in pe_detail
+        # PS should also be evaluated
+        ps_detail = [d for d in result["details"] if "ps_ratio" in d][0]
+        assert "PASS" in ps_detail
+        # B2B detected
+        b2b_detail = [d for d in result["details"] if "B2B" in d][0]
+        assert "cloud" in b2b_detail
+
+    def test_b2b_flag_override(self):
+        """is_b2b=True flag overrides industry detection."""
+        data = {
+            "pe_ratio": None,
+            "pe_history_percentile": None,
+            "revenue_growth_rate": 10,
+            "ps_ratio": 2.0,
+            "industry": "retail",  # not in B2B_INDUSTRIES
+            "is_b2b": True,  # but flag says B2B
+        }
+        result = score(data)
+        pe_detail = [d for d in result["details"] if "pe_ratio" in d and "missing" in d.lower()][0]
+        assert "B2B" in pe_detail
+        ps_detail = [d for d in result["details"] if "ps_ratio" in d][0]
+        assert "PASS" in ps_detail
+
+    def test_non_b2b_pe_missing_no_b2b_skip(self):
+        """Non-B2B company with PE missing: normal SKIP (no B2B note)."""
+        data = {
+            "pe_ratio": None,
+            "pe_history_percentile": None,
+            "revenue_growth_rate": 10,
+            "ps_ratio": 4.0,
+            "industry": "retail",
+        }
+        result = score(data)
+        pe_detail = [d for d in result["details"] if "pe_ratio" in d and "missing" in d.lower()][0]
+        assert "B2B" not in pe_detail
+        assert "SKIP" in pe_detail
+
+    def test_b2b_semiconductor_industry(self):
+        """Semiconductor is in B2B_INDUSTRIES."""
+        data = {
+            "pe_ratio": None,
+            "pe_history_percentile": None,
+            "revenue_growth_rate": 15,
+            "ps_ratio": 3.5,
+            "industry": "semiconductor",
+        }
+        result = score(data)
+        b2b_detail = [d for d in result["details"] if "B2B" in d][0]
+        assert "semiconductor" in b2b_detail
+
+    def test_b2b_ps_fail_high_valuation(self):
+        """B2B company with very high PS => FAIL."""
+        data = {
+            "pe_ratio": None,
+            "pe_history_percentile": None,
+            "revenue_growth_rate": 10,
+            "ps_ratio": 12.0,
+            "industry": "biotech",
+        }
+        result = score(data)
+        ps_detail = [d for d in result["details"] if "ps_ratio" in d][0]
+        assert "FAIL" in ps_detail
+        assert "高估" in ps_detail
