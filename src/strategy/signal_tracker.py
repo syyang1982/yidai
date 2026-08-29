@@ -207,7 +207,7 @@ class SignalTracker:
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, NULL, 0, 0, NULL, NULL,
                     ?, ?, NULL, NULL,
-                    NULL, '', '', 'active_6m', ?, ?
+                    NULL, '', '', 'active_6m', ?, ?, NULL
                 )
                 """,
                 [

@@ -7,6 +7,11 @@
 
 Grades:  A(33-40) B(26-32) C(17-25) D(9-16) F(0-8)
 Signals: BUY / HOLD / WATCH / REDUCE
+
+Dimension weights (from multi-window accuracy audit 2026-08-29):
+  有预测力: 健康(+0.50) 估值(+0.50) 股东(+0.50) 战略(+0.50)
+  弱预测力: 成长(+0.13)
+  反预测力: 盈利(-0.35) 现金流(-0.42)
 """
 
 from __future__ import annotations
@@ -14,6 +19,41 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Dict, Optional
+
+
+# ---------------------------------------------------------------------------
+# Dimension weights — based on multi-window accuracy audit (2026-08-29)
+# Each dimension score (0-5) is multiplied by its weight for signal decisions.
+# Raw total_score (unweighted) is still used for grade calculation.
+# ---------------------------------------------------------------------------
+DIMENSION_WEIGHTS: Dict[str, float] = {
+    "profitability": 0.5,   # 反预测力(-0.35), 降权
+    "health":        1.5,   # 强预测力(+0.50), 加权
+    "cashflow":      0.5,   # 反预测力(-0.42), 降权
+    "valuation":     1.5,   # 强预测力(+0.50), 加权
+    "growth":        1.0,   # 弱预测力(+0.13), 维持
+    "dividend":      0.8,   # 样本不足, 轻微降权
+    "ownership":     1.2,   # 强预测力(+0.50), 加权
+    "strategy":      1.2,   # 强预测力(+0.50), 加权
+}
+
+
+def _compute_weighted_total(
+    profitability: int, health: int, cashflow: int,
+    valuation: int, growth: int, dividend: int,
+    ownership: int, strategy: int,
+) -> float:
+    """Compute weighted total score for signal decisions.
+
+    Returns a float. Max possible = 5 * sum(weights) ≈ 41.0
+    """
+    scores = {
+        "profitability": profitability, "health": health,
+        "cashflow": cashflow, "valuation": valuation,
+        "growth": growth, "dividend": dividend,
+        "ownership": ownership, "strategy": strategy,
+    }
+    return sum(scores[k] * DIMENSION_WEIGHTS[k] for k in DIMENSION_WEIGHTS)
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +177,7 @@ def _compute_signal(
     dividend: int,
     ownership: int,
     strategy: int,
+    weighted_total: Optional[float] = None,
 ) -> str:
     """Determine BUY / HOLD / WATCH / REDUCE signal.
 
@@ -145,9 +186,11 @@ def _compute_signal(
          health < 2  OR  cashflow < 2  OR  ownership < 1
       2. Very low total -> REDUCE (total <= 16)
       3. Any dim < 2 -> REDUCE
-      4. Strong + cheap -> BUY (total >= 33 AND valuation >= 4)
+      4. Strong + cheap -> BUY (weighted_total >= 33 AND dimension gates)
       5. Adequate -> HOLD (total >= 17)
       6. Otherwise -> WATCH
+
+    weighted_total: if provided, uses dimension-weighted score for BUY threshold.
     """
     scores = [profitability, health, cashflow, valuation, growth, ownership, strategy]
 
@@ -163,10 +206,10 @@ def _compute_signal(
     if any(s < 2 for s in scores):
         return "REDUCE"
 
-    # 4. Strong buy signal (adjusted for 8-dim scale)
-    # 审计发现: 盈利/现金流高分反预测力，健康/成长高分有预测力
-    # 故增加健康和成长门槛，排除"quality trap"
-    if total >= 33 and valuation >= 4 and health >= 3 and growth >= 3:
+    # 4. Strong buy signal — use weighted_total if available
+    # 审计发现: 健康/估值/股东/战略有预测力, 盈利/现金流反预测力
+    check_total = weighted_total if weighted_total is not None else total
+    if check_total >= 33 and valuation >= 4 and health >= 3 and growth >= 3:
         return "BUY"
 
     # 5. Hold-worthy
@@ -204,6 +247,7 @@ class ScoreResult:
 
     # --- auto-computed (excluded from __init__) ---
     total_score: int = field(init=False)
+    weighted_total: float = field(init=False)
     grade: str = field(init=False)
     signal: str = field(init=False)
 
@@ -218,6 +262,12 @@ class ScoreResult:
             + self.ownership_score
             + self.strategy_score
         )
+        self.weighted_total = _compute_weighted_total(
+            self.profitability_score, self.health_score,
+            self.cashflow_score, self.valuation_score,
+            self.growth_score, self.dividend_score,
+            self.ownership_score, self.strategy_score,
+        )
         self.grade = _compute_grade(self.total_score)
         self.signal = _compute_signal(
             self.total_score,
@@ -229,4 +279,5 @@ class ScoreResult:
             self.dividend_score,
             self.ownership_score,
             self.strategy_score,
+            weighted_total=self.weighted_total,
         )

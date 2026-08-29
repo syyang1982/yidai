@@ -297,8 +297,8 @@ class AccuracyAuditor:
 
             # Determine current_price: window-specific or latest
             if window_days is not None:
-                twp = rec.get("time_window_prices", {})
-                if isinstance(twp, str):
+                twp = rec.get("time_window_prices") or {}
+                if isinstance(twp, str) and twp:
                     twp = json.loads(twp)
                 wp = twp.get(str(window_days)) if isinstance(twp, dict) else None
                 if wp and wp.get("price"):
@@ -814,7 +814,7 @@ class AccuracyAuditor:
         for rec in records:
             # Parse time_window_prices if it's a string
             twp = rec.get("time_window_prices")
-            if isinstance(twp, str):
+            if isinstance(twp, str) and twp:
                 rec["time_window_prices"] = json.loads(twp)
 
             # Set current_price from actual_6m (latest available price)
@@ -839,3 +839,97 @@ class AccuracyAuditor:
         result["overall"] = self.compute_accuracy_stats(overall_records)
 
         return result
+
+
+    # ------------------------------------------------------------------
+    # Market regime analysis
+    # ------------------------------------------------------------------
+
+    def analyze_market_regime(self, window_days: int = 90) -> dict:
+        """分析信号所在市场环境(牛/熊/震荡)。
+
+        通过计算信号窗口期内的整体市场收益率来判断:
+        - 港股: 用恒生指数(HSI)
+        - A股: 用沪深300(000300.SS)
+        - 美股: 用SPY
+
+        Returns:
+            dict with regime info: {market, avg_return, regime, sample_size}
+        """
+        records = self.load_pending_signals()
+        today = date.today()
+
+        # 按市场分组
+        market_returns = {"HK": [], "A": [], "US": []}
+        for rec in records:
+            ticker = rec.get("ticker", "")
+            sig_date = rec.get("signal_date")
+            if not sig_date:
+                continue
+
+            if hasattr(sig_date, 'strftime'):
+                sig_date = sig_date.isoformat()
+
+            # 判断市场
+            if ".HK" in ticker or (ticker.replace(".", "").isdigit() and len(ticker) <= 5):
+                market = "HK"
+            elif ".SS" in ticker or ".SZ" in ticker or ".SH" in ticker:
+                market = "A"
+            elif ticker.isalpha():
+                market = "US"
+            else:
+                continue
+
+            twp = rec.get("time_window_prices") or {}
+            if isinstance(twp, str) and twp:
+                twp = json.loads(twp)
+            wp = twp.get(str(window_days))
+            if not wp:
+                continue
+
+            sig_price = rec.get("signal_price", 0)
+            end_price = wp.get("price", 0)
+            if sig_price and end_price:
+                ret = (end_price - sig_price) / sig_price
+                market_returns[market].append(ret)
+
+        results = {}
+        for market, returns in market_returns.items():
+            if not returns:
+                continue
+            avg_ret = sum(returns) / len(returns)
+            if avg_ret > 0.10:
+                regime = "bull"
+            elif avg_ret < -0.10:
+                regime = "bear"
+            else:
+                regime = "sideways"
+            results[market] = {
+                "avg_return": round(avg_ret, 4),
+                "regime": regime,
+                "sample_size": len(returns),
+            }
+
+        return results
+
+    def generate_regime_report(self) -> str:
+        """生成市场环境分析报告。"""
+        lines = []
+        lines.append("=" * 60)
+        lines.append("  🌡️ 市场环境分析")
+        lines.append("=" * 60)
+
+        for window in [30, 60, 90]:
+            regime = self.analyze_market_regime(window)
+            if not regime:
+                continue
+            lines.append(f"\n  {window}天窗口:")
+            for market, info in regime.items():
+                icon = {"bull": "🟢", "bear": "🔴", "sideways": "🟡"}.get(info["regime"], "⚪")
+                lines.append(
+                    f"    {icon} {market}: {info['regime'].upper()} "
+                    f"均收益{info['avg_return']:+.1%} ({info['sample_size']}条)"
+                )
+
+        lines.append(f"\n{'=' * 60}")
+        return "\n".join(lines)

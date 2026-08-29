@@ -1303,7 +1303,13 @@ def cmd_audit(args):
         result = auditor.backfill_time_windows([30, 60, 90, 180])
         print(f'  ✅ 更新 {result["updated"]} 条记录')
         for w, info in result["by_window"].items():
-            print(f"    {w}天: {info["fetched"]}条已获取, {info["too_recent"]}条太新跳过")
+            fetched = info["fetched"]
+            too_recent = info["too_recent"]
+            print(f"    {w}天: {fetched}条已获取, {too_recent}条太新跳过")
+        print()
+
+    if getattr(args, "regime", False):
+        print(auditor.generate_regime_report())
         print()
 
     stats = auditor.generate_full_report()
@@ -1514,6 +1520,7 @@ def main():
     p_audit.add_argument("--backfill", action="store_true", help="先回填当前价格")
     p_audit.add_argument("--limit", type=int, default=200, help="回填数量限制")
     p_audit.add_argument("--windows", action="store_true", help="回填时间窗口价格(30/60/90/180天)")
+    p_audit.add_argument("--regime", action="store_true", help="分析市场环境(牛/熊/震荡)")
 
     # indicators
     p_indicators = subparsers.add_parser("indicators", help="领先指标管理")
