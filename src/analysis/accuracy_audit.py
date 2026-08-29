@@ -8,6 +8,7 @@ Supports multi-window accuracy calculation via Yahoo Finance historical prices.
 from __future__ import annotations
 
 import json
+import math
 import time as _time
 from collections import defaultdict
 from datetime import date, datetime, timedelta
@@ -26,6 +27,7 @@ class AccuracyAuditor:
 
     def __init__(self, db_path: Optional[str | Path] = None) -> None:
         self.db_path = Path(db_path) if db_path else DEFAULT_DB_PATH
+        self._price_cache: dict[str, Optional[float]] = {}
         # Ensure time_window_prices column exists
         self._ensure_time_window_column()
 
@@ -125,10 +127,121 @@ class AccuracyAuditor:
 
         return None
 
+    def _detect_market(self, ticker: str) -> tuple[str, str]:
+        """Detect market and extract code from ticker.
+
+        Returns (market, code) where market is 'a_share', 'hk', or 'us'.
+        """
+        t = ticker.strip().upper()
+        if t.endswith(".HK"):
+            code = t.replace(".HK", "").lstrip("0") or "0"
+            return "hk", code
+        if t.endswith(".SS"):
+            return "a_share", t.replace(".SS", "")
+        if t.endswith(".SZ"):
+            return "a_share", t.replace(".SZ", "")
+        if t.endswith(".SH"):
+            return "a_share", t.replace(".SH", "")
+        if t.isdigit():
+            if len(t) == 5:
+                return "hk", t.lstrip("0") or "0"
+            if len(t) == 6:
+                return "a_share", t
+        if t.isalpha():
+            return "us", t
+        return "unknown", t
+
+    def _fetch_eastmoney_price_a_share(self, code: str) -> Optional[float]:
+        """Fetch A-share price from eastmoney push2 API.
+
+        Returns the closing price in yuan, or None on failure.
+        f43 field is in fen (分), so divide by 100.
+        """
+        prefix = "1" if code.startswith("6") else "0"
+        secid = f"{prefix}.{code}"
+        url = "https://push2.eastmoney.com/api/qt/stock/get"
+        params = {
+            "secid": secid,
+            "fields": "f43,f57,f58",
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Referer": "https://quote.eastmoney.com/",
+        }
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            f43 = data.get("data", {}).get("f43")
+            if f43 is not None and f43 != "-":
+                return float(f43) / 100.0
+        except Exception:
+            pass
+        return None
+
+    def _fetch_eastmoney_price_hk(self, code: str) -> Optional[float]:
+        """Fetch HK stock price from eastmoney MAININDICATOR.
+
+        Derives price from market_cap / shares, or None on failure.
+        """
+        url = "https://datacenter.eastmoney.com/securities/api/data/v1/get"
+        params = {
+            "reportName": "RPT_HKF10_FN_MAININDICATOR",
+            "columns": "REPORT_DATE,TOTAL_MARKET_CAP,ISSUED_COMMON_SHARES",
+            "filter": f'(SECUCODE="{code}.HK")',
+            "pageNumber": 1,
+            "pageSize": 1,
+            "sortTypes": "-1",
+            "sortColumns": "REPORT_DATE",
+            "source": "F10",
+            "client": "PC",
+        }
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            resp.raise_for_status()
+            body = resp.json()
+            rows = (body.get("result") or {}).get("data") or []
+            if rows:
+                mkt_cap = rows[0].get("TOTAL_MARKET_CAP")
+                shares = rows[0].get("ISSUED_COMMON_SHARES")
+                if mkt_cap and shares and shares > 0:
+                    return float(mkt_cap) / float(shares)
+        except Exception:
+            pass
+        return None
+
+    def _fetch_eastmoney_price_us(self, code: str) -> Optional[float]:
+        """Fetch US stock price from eastmoney push2 API.
+
+        f43 field is in cents, so divide by 100.
+        """
+        url = "https://push2.eastmoney.com/api/qt/stock/get"
+        params = {
+            "secid": f"105.{code}",
+            "fields": "f43,f57,f58",
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Referer": "https://quote.eastmoney.com/",
+        }
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            f43 = data.get("data", {}).get("f43")
+            if f43 is not None and f43 != "-":
+                return float(f43) / 100.0
+        except Exception:
+            pass
+        return None
+
     def fetch_price_at_date(
         self, ticker: str, target_date: str
     ) -> Optional[float]:
-        """Fetch the closing price of *ticker* on *target_date* via Yahoo Finance v8 chart API.
+        """Fetch the closing price of *ticker* on *target_date*.
+
+        Strategy: check memory cache → Yahoo Finance → eastmoney fallback.
 
         Args:
             ticker: Internal ticker format (e.g. 01810.HK, 600519.SS, LX).
@@ -137,6 +250,26 @@ class AccuracyAuditor:
         Returns:
             The closing price closest to *target_date*, or None on failure.
         """
+        # 1. Check cache
+        cache_key = f"{ticker}:{target_date}"
+        if cache_key in self._price_cache:
+            return self._price_cache[cache_key]
+
+        # 2. Try Yahoo Finance
+        price = self._fetch_yahoo_price(ticker, target_date)
+
+        # 3. Eastmoney fallback when Yahoo fails
+        if price is None:
+            price = self._fetch_eastmoney_fallback(ticker)
+
+        # 4. Cache result (including None to avoid re-fetching)
+        self._price_cache[cache_key] = price
+        return price
+
+    def _fetch_yahoo_price(
+        self, ticker: str, target_date: str
+    ) -> Optional[float]:
+        """Fetch historical price from Yahoo Finance v8 chart API."""
         yahoo_ticker = self._to_yahoo_ticker(ticker)
         if not yahoo_ticker:
             return None
@@ -176,7 +309,7 @@ class AccuracyAuditor:
             return None
 
         # Find the price closest to target_date
-        target_ts = target.timestamp()
+        target_ts = datetime.strptime(target_date, "%Y-%m-%d").timestamp()
         best_diff = float("inf")
         best_close = None
         for ts, close in zip(timestamps, closes):
@@ -188,6 +321,17 @@ class AccuracyAuditor:
                 best_close = close
 
         return best_close
+
+    def _fetch_eastmoney_fallback(self, ticker: str) -> Optional[float]:
+        """Try eastmoney as fallback. Returns real-time price (best-effort)."""
+        market, code = self._detect_market(ticker)
+        if market == "a_share":
+            return self._fetch_eastmoney_price_a_share(code)
+        elif market == "hk":
+            return self._fetch_eastmoney_price_hk(code)
+        elif market == "us":
+            return self._fetch_eastmoney_price_us(code)
+        return None
 
     # ------------------------------------------------------------------
     # Database queries
@@ -275,6 +419,7 @@ class AccuracyAuditor:
         """
         total = 0
         correct = 0
+        skipped = 0
         returns: list[float] = []
 
         by_type: dict[str, dict] = defaultdict(
@@ -304,6 +449,7 @@ class AccuracyAuditor:
                 if wp and wp.get("price"):
                     current_price = wp["price"]
                 else:
+                    skipped += 1
                     continue  # skip records without this window's price
             else:
                 current_price = rec.get("current_price", 0.0)
@@ -384,6 +530,7 @@ class AccuracyAuditor:
         return {
             "total": total,
             "correct": correct,
+            "skipped": skipped,
             "direction_accuracy": correct / total if total > 0 else 0.0,
             "avg_return_pct": sum(returns) / len(returns) if returns else 0.0,
             "by_type": dict(by_type_out),
@@ -563,6 +710,26 @@ class AccuracyAuditor:
     # Report formatting
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _confidence_interval(accuracy: float, n: int) -> Optional[tuple[float, float]]:
+        """Compute 95% CI for a proportion using normal approximation.
+
+        Returns (lower, upper) as fractions, or None if n < 30.
+        """
+        if n < 30:
+            return None
+        se = math.sqrt(accuracy * (1 - accuracy) / n)
+        lower = max(0.0, accuracy - 1.96 * se)
+        upper = min(1.0, accuracy + 1.96 * se)
+        return (lower, upper)
+
+    @staticmethod
+    def _format_ci(ci: Optional[tuple[float, float]]) -> str:
+        """Format a CI tuple as a string, or empty if None."""
+        if ci is None:
+            return ""
+        return f" (95% CI: {ci[0]*100:.1f}%-{ci[1]*100:.1f}%)"
+
     def format_report(self, stats_or_result) -> str:
         """Format accuracy audit stats as a terminal report.
 
@@ -601,9 +768,13 @@ class AccuracyAuditor:
             avg_ret = stats["avg_return_pct"] * 100
 
             icon = "🟢" if acc >= 60 else "🟡" if acc >= 50 else "🔴"
+            ci = self._confidence_interval(stats["direction_accuracy"], total)
+            ci_str = self._format_ci(ci)
+            skipped = stats.get("skipped", 0)
+            skip_str = f" (跳过{skipped}条)" if skipped > 0 else ""
             lines.append(
-                f"\n  {icon} {w}天窗口: 准确率 {acc:.1f}% "
-                f"({stats['correct']}/{total}) 均收益{avg_ret:+.1f}%"
+                f"\n  {icon} {w}天窗口: 准确率 {acc:.1f}%{ci_str} "
+                f"({stats['correct']}/{total}){skip_str} 均收益{avg_ret:+.1f}%"
             )
 
             # by_type
@@ -626,10 +797,15 @@ class AccuracyAuditor:
         overall = result.get("overall", {})
         if overall.get("total", 0) > 0:
             lines.append(f"\n  {thin}")
+            o_total = overall["total"]
+            o_ci = self._confidence_interval(
+                overall["direction_accuracy"], o_total
+            )
+            o_ci_str = self._format_ci(o_ci)
             lines.append(
                 f"  📊 总体(最新价格): 准确率 "
-                f"{overall['direction_accuracy']*100:.1f}% "
-                f"({overall['correct']}/{overall['total']})"
+                f"{overall['direction_accuracy']*100:.1f}%{o_ci_str} "
+                f"({overall['correct']}/{o_total})"
             )
 
             # By type for overall
@@ -707,13 +883,15 @@ class AccuracyAuditor:
         correct = stats["correct"]
         acc = stats["direction_accuracy"] * 100
         avg_ret = stats["avg_return_pct"] * 100
+        ci = self._confidence_interval(stats["direction_accuracy"], total)
+        ci_str = self._format_ci(ci)
 
         lines = [
             sep,
             "  📊 信号准确率审计报告",
             sep,
             "",
-            f"  🟢 整体方向准确率: {acc:.1f}% ({correct}/{total})",
+            f"  🟢 整体方向准确率: {acc:.1f}%{ci_str} ({correct}/{total})",
             f"  📈 平均收益率: {avg_ret:+.2f}%",
             f"  📊 样本量: {total} 条信号",
         ]
