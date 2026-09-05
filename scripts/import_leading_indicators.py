@@ -39,6 +39,13 @@ PORTFOLIO = [
              {"negative": {"growth": -1}, "positive": {"growth": 0.5}}),
             ("手机市占率", "全球智能手机市场份额", "季报数据", 14, 11, "%", "市场地位",
              {"negative": {"growth": -1}, "positive": {"growth": 0.5}}),
+            # ── AI/大模型领先指标 (周频更新) ──
+            ("小爱同学月活", "小爱同学语音助手月活跃用户数(亿)", "季报/第三方", 1.5, 1.0, "亿", "AI用户",
+             {"negative": {"growth": -1}, "positive": {"growth": 0.5}}),
+            ("AI产品发布数", "近30天小米AI/大模型相关产品发布或重大更新数量", "新闻监控", 2, 0, "个/月", "AI进展",
+             {"negative": {"strategy": -0.5}, "positive": {"strategy": 0.5}}),
+            ("AI新闻情绪", "近7天小米AI相关新闻正面比例(%)", "新闻监控", 60, 30, "%", "AI进展",
+             {"negative": {"strategy": -0.5}, "positive": {"strategy": 0.3}}),
         ],
     },
     # 2. 金山云 3896.HK

@@ -289,6 +289,11 @@ def score_all(
     previous_health_data: dict | None = None,
     insider_activity_events: list[dict] | None = None,
     ownership_structure_events: list[dict] | None = None,
+    pe_percentile: float | None = None,
+    prev_signal: str | None = None,
+    prev_signal_date: str | None = None,
+    eval_date: str | None = None,
+    regime_adjustments: dict | None = None,
 ) -> dict:
     """Aggregate all 7 dimension scores and return a result dict.
 
@@ -362,6 +367,16 @@ def score_all(
     if strategy_score is None:
         strategy_score = 0
 
+    # Apply regime adjustments to PE percentile cap
+    effective_pe_cap = 0.80  # default
+    effective_buy_delta = 0  # default
+    if regime_adjustments:
+        adj = regime_adjustments
+        base_pe_cap = 0.80
+        pe_adj = adj.get("pe_cap_adjustment", 1.0)
+        effective_pe_cap = base_pe_cap * pe_adj
+        effective_buy_delta = adj.get("buy_threshold_delta", 0)
+
     # --- Build ScoreResult (auto-computes total / grade / signal) ---
     sr = ScoreResult(
         ticker=ticker,
@@ -375,6 +390,12 @@ def score_all(
         ownership_score=ownership_score,
         strategy_score=strategy_score,
         qualitative_confirmed=qualitative_confirmed,
+        pe_percentile=pe_percentile,
+        prev_signal=prev_signal,
+        prev_signal_date=prev_signal_date,
+        eval_date=eval_date,
+        pe_cap=effective_pe_cap,
+        buy_score_delta=effective_buy_delta,
     )
 
     # Combine detail strings from all modules

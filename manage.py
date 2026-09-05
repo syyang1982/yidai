@@ -1387,6 +1387,59 @@ def cmd_constraints(args):
     print(pc.format_report(result))
 
 
+def cmd_sell_alerts(args):
+    """卖出提醒 — 自动扫描持仓是否进入卖出区间。"""
+    from src.analysis.sell_alert import (
+        scan_sell_alerts, format_alerts_table, format_alerts_detail,
+    )
+
+    alerts = scan_sell_alerts()
+
+    print("=" * 68)
+    print("  意怠工程 — 卖出提醒扫描")
+    print("=" * 68)
+    print()
+
+    if args.detail:
+        print(format_alerts_detail(alerts))
+    else:
+        print(format_alerts_table(alerts))
+
+    # 统计
+    critical = sum(1 for a in alerts if a.severity == "CRITICAL")
+    warning = sum(1 for a in alerts if a.severity == "WARNING")
+    info = sum(1 for a in alerts if a.severity == "INFO")
+    print()
+    print(f"  共 {len(alerts)} 条提醒: 🔴{critical} 🟡{warning} 🔵{info}")
+
+    if critical > 0:
+        print()
+        print("  ⚠️  有 CRITICAL 级别提醒, 建议立即处理!")
+        print("  用 --detail 查看详细建议")
+
+
+def cmd_regime(args):
+    """市场环境检测 — 判断当前是牛市/熊市/震荡。"""
+    from src.analysis.market_regime import (
+        get_market_regime, get_regime_adjustments, format_regime_report,
+    )
+
+    print("=" * 68)
+    print("  意怠工程 — 市场环境检测")
+    print("=" * 68)
+    print()
+
+    regime_data = get_market_regime()
+    print(format_regime_report(regime_data))
+
+    adjustments = get_regime_adjustments(regime_data["regime"])
+    print()
+    print(f"  信号阈值调整:")
+    print(f"    BUY门槛: 33 → {33 + adjustments['buy_threshold_delta']}")
+    print(f"    PE上限: 80% → {80 * adjustments['pe_cap_adjustment']:.0f}%")
+    print(f"    REDUCE门槛: 不变")
+
+
 def main():
     """Entry point for the YiDai investment analysis CLI."""
     parser = argparse.ArgumentParser(
@@ -1410,6 +1463,8 @@ def main():
   python manage.py audit --backfill       信号准确率审计
   python manage.py indicators             领先指标追踪
   python manage.py constraints            组合约束检查
+  python manage.py sell-alerts            卖出提醒扫描
+  python manage.py regime                 市场环境检测
         """,
     )
 
@@ -1530,6 +1585,13 @@ def main():
     # constraints
     subparsers.add_parser("constraints", help="组合约束检查")
 
+    # sell-alerts
+    p_sell = subparsers.add_parser("sell-alerts", help="卖出提醒扫描")
+    p_sell.add_argument("--detail", action="store_true", help="显示详细建议")
+
+    # regime
+    subparsers.add_parser("regime", help="市场环境检测")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1554,6 +1616,8 @@ def main():
         "audit": cmd_audit,
         "indicators": cmd_indicators,
         "constraints": cmd_constraints,
+        "sell-alerts": cmd_sell_alerts,
+        "regime": cmd_regime,
     }
 
     func = commands.get(args.command)

@@ -179,6 +179,12 @@ def _compute_signal(
     strategy: int,
     weighted_total: Optional[float] = None,
     qualitative_confirmed: bool = True,
+    pe_percentile: Optional[float] = None,
+    prev_signal: Optional[str] = None,
+    prev_signal_date: Optional[str] = None,
+    eval_date: Optional[str] = None,
+    pe_cap: float = 0.80,
+    buy_score_delta: int = 0,
 ) -> str:
     """Determine BUY / HOLD / WATCH / REDUCE signal.
 
@@ -187,12 +193,18 @@ def _compute_signal(
          health < 2  OR  cashflow < 2  OR  ownership < 1
       2. Very low total -> REDUCE (total <= 16)
       3. Any quant dim < 2 -> REDUCE (excludes ownership/strategy)
-      4. Strong + cheap + confirmed -> BUY
+      4. Strong + cheap + confirmed -> BUY (with valuation guard)
       5. Adequate -> HOLD (total >= 17)
       6. Otherwise -> WATCH
 
     weighted_total: if provided, uses dimension-weighted score for BUY threshold.
     qualitative_confirmed: if False, blocks BUY (D7/D8 not manually scored).
+    pe_percentile: if provided, blocks BUY when PE > pe_cap percentile.
+    pe_cap: PE percentile cap for BUY (default 0.80, adjusted by regime).
+    buy_score_delta: regime-based adjustment to BUY threshold (default 0).
+    prev_signal: previous signal type for holding protection.
+    prev_signal_date: date of previous signal (ISO string).
+    eval_date: current evaluation date (ISO string).
     """
     # Quantitative dims only for critical check (exclude ownership/strategy)
     # dividend=0 means "no data", not "bad" — exclude from critical check
@@ -215,9 +227,53 @@ def _compute_signal(
     # 4. Strong buy signal — requires qualitative confirmation
     # 审计发现: 健康/估值/股东/战略有预测力, 盈利/现金流反预测力
     check_total = weighted_total if weighted_total is not None else total
-    if (check_total >= 33 and valuation >= 4 and health >= 3 and growth >= 3
+    # Apply regime-based BUY threshold adjustment
+    effective_buy_threshold = 33 + buy_score_delta
+    if (check_total >= effective_buy_threshold and valuation >= 4 and health >= 3 and growth >= 3
             and qualitative_confirmed):
+
+        # --- Improvement 1: Valuation guard ---
+        # Block BUY if PE is at expensive valuations
+        # pe_cap is regime-adjusted (bear: 0.70, neutral: 0.80, bull: 0.85)
+        if pe_percentile is not None and pe_percentile > pe_cap:
+            return "HOLD"  # Downgrade BUY to HOLD when expensive
+
+        # --- Improvement 2: REDUCE holding protection ---
+        # After REDUCE signal, block BUY for 3 months to avoid whipsawing
+        if prev_signal == "REDUCE" and prev_signal_date and eval_date:
+            try:
+                from datetime import date as _date
+                psd = _date.fromisoformat(prev_signal_date)
+                ed = _date.fromisoformat(eval_date)
+                days_since_reduce = (ed - psd).days
+                if days_since_reduce < 90:  # 3 months = ~90 days
+                    return "HOLD"  # Still in protection period
+            except (ValueError, TypeError):
+                pass  # Date parsing failed, skip protection
+
         return "BUY"
+
+    # 4b. Cautious re-entry after REDUCE protection period
+    # After 90-day protection expires, allow BUY at slightly lower threshold
+    # This captures mean-reversion opportunities with proper confirmation
+    if prev_signal == "REDUCE" and prev_signal_date and eval_date:
+        try:
+            from datetime import date as _date2
+            psd2 = _date2.fromisoformat(prev_signal_date)
+            ed2 = _date2.fromisoformat(eval_date)
+            days_since_reduce2 = (ed2 - psd2).days
+            # After protection period (90d) but within 180d: cautious re-entry
+            if 90 <= days_since_reduce2 <= 180:
+                # Require strong fundamentals but relaxed total score
+                if (check_total >= effective_buy_threshold - 2
+                        and valuation >= 3 and health >= 3 and growth >= 3
+                        and qualitative_confirmed):
+                    # Still apply PE guard
+                    if pe_percentile is not None and pe_percentile > pe_cap:
+                        return "HOLD"
+                    return "BUY"
+        except (ValueError, TypeError):
+            pass
 
     # 5. Hold-worthy
     if total >= 17:
@@ -261,6 +317,14 @@ class ScoreResult:
     # --- qualitative confirmation flag ---
     qualitative_confirmed: bool = True
 
+    # --- improvement fields (optional) ---
+    pe_percentile: Optional[float] = None
+    prev_signal: Optional[str] = None
+    prev_signal_date: Optional[str] = None
+    eval_date: Optional[str] = None
+    pe_cap: float = 0.80
+    buy_score_delta: int = 0
+
     def __post_init__(self) -> None:
         self.total_score = (
             self.profitability_score
@@ -291,4 +355,10 @@ class ScoreResult:
             self.strategy_score,
             weighted_total=self.weighted_total,
             qualitative_confirmed=self.qualitative_confirmed,
+            pe_percentile=self.pe_percentile,
+            prev_signal=self.prev_signal,
+            prev_signal_date=self.prev_signal_date,
+            eval_date=self.eval_date,
+            pe_cap=self.pe_cap,
+            buy_score_delta=self.buy_score_delta,
         )
