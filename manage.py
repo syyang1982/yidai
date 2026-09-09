@@ -40,6 +40,7 @@
 import sys
 import os
 import argparse
+from pathlib import Path
 
 # Ensure project root is in path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -1440,6 +1441,32 @@ def cmd_regime(args):
     print(f"    REDUCE门槛: 不变")
 
 
+def cmd_calibrate(args):
+    """信号阈值校准 — 基于历史数据优化评分切分点。"""
+    from scripts.calibrate_thresholds import calibrate, format_report, apply_thresholds
+
+    result = calibrate(
+        db_path=Path("db/signals.duckdb"),
+        window_days=args.window,
+    )
+    print(format_report(result))
+
+    if args.apply:
+        apply_thresholds(result, dry_run=False)
+
+
+def cmd_migrate_trades(args):
+    """迁移 trade-log.md 到结构化决策日志。"""
+    from scripts.migrate_trades import migrate, TRADE_LOG_PATH, DEFAULT_DB
+
+    trade_log = Path(args.trade_log) if args.trade_log else TRADE_LOG_PATH
+    migrate(
+        trade_log_path=trade_log,
+        db_path=DEFAULT_DB,
+        apply=args.apply,
+    )
+
+
 def main():
     """Entry point for the YiDai investment analysis CLI."""
     parser = argparse.ArgumentParser(
@@ -1589,6 +1616,16 @@ def main():
     p_sell = subparsers.add_parser("sell-alerts", help="卖出提醒扫描")
     p_sell.add_argument("--detail", action="store_true", help="显示详细建议")
 
+    # calibrate
+    p_cal = subparsers.add_parser("calibrate", help="信号阈值校准")
+    p_cal.add_argument("--window", type=int, default=None, help="时间窗口(天)")
+    p_cal.add_argument("--apply", action="store_true", help="应用推荐阈值")
+
+    # migrate-trades
+    p_mig = subparsers.add_parser("migrate-trades", help="迁移trade-log.md到决策日志")
+    p_mig.add_argument("--apply", action="store_true", help="实际写入(默认仅预览)")
+    p_mig.add_argument("--trade-log", default=None, help="trade-log.md路径")
+
     # regime
     subparsers.add_parser("regime", help="市场环境检测")
 
@@ -1618,6 +1655,8 @@ def main():
         "constraints": cmd_constraints,
         "sell-alerts": cmd_sell_alerts,
         "regime": cmd_regime,
+        "calibrate": cmd_calibrate,
+        "migrate-trades": cmd_migrate_trades,
     }
 
     func = commands.get(args.command)

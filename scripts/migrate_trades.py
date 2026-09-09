@@ -1,412 +1,349 @@
-#!/usr/bin/env python3
 """
-Migrate trade-log.md (40 trades) → decision_log table in signals.duckdb
+W2.1.3 — 从 trade-log.md 迁移交易记录到结构化决策日志
+
+解析 ~/.hermes/trading/trade-log.md 中的交易条目，
+转换为 DecisionRecord 格式并写入 yidai DuckDB。
+
+用法:
+    cd ~/.hermes/yidai
+    python scripts/migrate_trades.py              # 试运行(不写入)
+    python scripts/migrate_trades.py --apply       # 实际写入
+    python scripts/migrate_trades.py --apply --db db/decisions.duckdb  # 指定DB
 """
+
+from __future__ import annotations
 
 import re
-import json
-import hashlib
-import os
+import sys
 from datetime import datetime
+from pathlib import Path
 
-import duckdb
+# 添加项目根目录
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
-# Paths
-TRADE_LOG = os.path.expanduser("~/.hermes/trading/trade-log.md")
-DB_PATH = os.path.expanduser("~/.hermes/yidai/db/signals.duckdb")
-KNOWLEDGE_DIR = os.path.expanduser("~/.hermes/yidai/knowledge/companies")
+from src.strategy.decision import DecisionLog, DecisionRecord
 
-# Ticker mapping: trade-log name → (ticker, market, company_name, currency)
+TRADE_LOG_PATH = Path.home() / ".hermes" / "trading" / "trade-log.md"
+DEFAULT_DB = PROJECT_ROOT / "db" / "decisions.duckdb"
+
+# ticker → (company_name, market) 映射
 TICKER_MAP = {
-    "LX": ("LX", "US", "LexinFintech", "USD"),
-    "Xiaomi": ("01810.HK", "HK", "小米集团", "HKD"),
-    "Xiaomi Add": ("01810.HK", "HK", "小米集团", "HKD"),
-    "ANTA": ("02020.HK", "HK", "安踏体育", "HKD"),
-    "ANTA Sports": ("02020.HK", "HK", "安踏体育", "HKD"),
-    "Weimob": ("02252.HK", "HK", "微创机器人", "HKD"),
-    "Weimob Swing": ("02252.HK", "HK", "微创机器人", "HKD"),
-    "Medbot": ("02252.HK", "HK", "微创机器人", "HKD"),
-    "Medbot/Weimob": ("02252.HK", "HK", "微创机器人", "HKD"),
-    "RoboSense": ("02498.HK", "HK", "速腾聚创", "HKD"),
-    "Kingsoft SW": ("03888.HK", "HK", "金山软件", "HKD"),
-    "Kingsoft Cloud": ("03896.HK", "HK", "金山云", "HKD"),
-    "Bilibili": ("09626.HK", "HK", "哔哩哔哩", "HKD"),
-    "MINISO": ("09896.HK", "HK", "名创优品", "HKD"),
-    "NetEase": ("09999.HK", "HK", "网易", "HKD"),
-    "Alibaba": ("09988.HK", "HK", "阿里巴巴", "HKD"),
-    "CMB": ("600036.SH", "SH", "招商银行", "CNY"),
-    "China Merchants Bank": ("600036.SH", "SH", "招商银行", "CNY"),
-    "361 Degrees": ("1361.HK", "HK", "361度国际有限公司", "HKD"),
-    "Stockland": ("SGP.AX", "AX", "Stockland Group", "AUD"),
+    "LX": ("LexinFintech", "US"),
+    "1810.HK": ("小米集团", "HK"),
+    "2020.HK": ("安踏体育", "HK"),
+    "2252.HK": ("微创机器人", "HK"),
+    "2498.HK": ("速腾聚创", "HK"),
+    "3888.HK": ("金山软件", "HK"),
+    "3896.HK": ("金山云", "HK"),
+    "9626.HK": ("哔哩哔哩", "HK"),
+    "9896.HK": ("名创优品", "HK"),
+    "9999.HK": ("网易", "HK"),
+    "09988.HK": ("阿里巴巴", "HK"),
+    "SGP.AX": ("Stockland", "AU"),
+    "1361.HK": ("361度", "HK"),
+    "600036.SH": ("招商银行", "A"),
 }
 
-# Known dimension scores from knowledge/companies files
-# Format: ticker → {dimension: score}
-COMPANY_SCORES = {}
+# 货币推断
+CURRENCY_MAP = {
+    "HK": "HKD", "A": "CNY", "US": "USD", "AU": "AUD",
+}
+
+# 名称 → ticker 反向映射
+NAME_TICKER_MAP = {
+    "LX": "LX", "LexinFintech": "LX",
+    "Xiaomi": "1810.HK", "小米": "1810.HK",
+    "ANTA": "2020.HK", "ANTA Sports": "2020.HK", "安踏": "2020.HK",
+    "Weimob": "2252.HK", "Medbot": "2252.HK", "微创": "2252.HK",
+    "RoboSense": "2498.HK", "速腾": "2498.HK",
+    "Kingsoft SW": "3888.HK", "金山软件": "3888.HK",
+    "Kingsoft Cloud": "3896.HK", "金山云": "3896.HK",
+    "Bilibili": "9626.HK", "B站": "9626.HK",
+    "MINISO": "9896.HK", "名创": "9896.HK",
+    "NetEase": "9999.HK", "网易": "9999.HK",
+    "Alibaba": "09988.HK", "阿里": "09988.HK",
+    "Stockland": "SGP.AX",
+    "361": "1361.HK", "361度": "1361.HK", "361 Degrees": "1361.HK",
+    "China Merchants Bank": "600036.SH", "招行": "600036.SH", "招商银行": "600036.SH",
+}
 
 
-def load_company_scores():
-    """Load dimension scores from knowledge/companies/*.md files."""
-    scores = {}
-    if not os.path.isdir(KNOWLEDGE_DIR):
-        return scores
-    for fname in os.listdir(KNOWLEDGE_DIR):
-        if not fname.endswith(".md"):
-            continue
-        ticker = fname.replace(".md", "")
-        # Normalize: 01810.HK → 01810.HK (keep as-is)
-        filepath = os.path.join(KNOWLEDGE_DIR, fname)
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                content = f.read()
-        except Exception:
-            continue
-
-        dim_scores = {}
-        # Parse markdown table rows like: | 盈利 | 5/5 | ↑ |
-        for m in re.finditer(r"\|\s*(盈利|健康|现金流|估值|成长|股东|战略)\s*\|\s*(\d+)/(\d+)\s*\|", content):
-            dim_name = m.group(1)
-            score = int(m.group(2))
-            dim_scores[dim_name] = {"score": score, "details": []}
-
-        if dim_scores:
-            scores[ticker] = dim_scores
-    return scores
-
-
-def resolve_ticker(name):
-    """Resolve trade-log ticker name to (ticker, market, company_name, currency)."""
-    # Try exact match first
-    if name in TICKER_MAP:
-        return TICKER_MAP[name]
-    # Try case-insensitive
-    for key, val in TICKER_MAP.items():
-        if key.lower() == name.lower():
-            return val
-    # Try substring match (e.g. "ANTA Sports PARTIAL SELL" contains "ANTA Sports")
-    for key, val in TICKER_MAP.items():
-        if key.lower() in name.lower() or name.lower() in key.lower():
-            return val
-    return (name, "UNKNOWN", name, "UNKNOWN")
-
-
-def parse_trade_log(path):
-    """Parse trade-log.md and extract all trades."""
-    with open(path, "r", encoding="utf-8") as f:
-        content = f.read()
-
+def parse_trade_log(path: Path) -> list[dict]:
+    """解析 trade-log.md，返回原始交易条目列表。"""
+    text = path.read_text(encoding="utf-8")
     trades = []
 
-    # Pattern: ### Trade #NNN — Name (optional details)
-    # Followed by structured fields
-    trade_pattern = re.compile(
-        r"###\s*Trade\s*#(\d+)\s*[—–-]\s*(.+?)(?:\n|$)", re.MULTILINE
+    # 匹配 ### Trade #XXX — Name (Ticker) 或类似格式
+    pattern = re.compile(
+        r"###\s+Trade\s+#(\d+)\s+—\s+(.+?)$",
+        re.MULTILINE,
     )
 
-    for match in trade_pattern.finditer(content):
+    for match in pattern.finditer(text):
         trade_num = int(match.group(1))
-        trade_title = match.group(2).strip()
+        title = match.group(2).strip()
 
-        # Extract the trade block (until next ### or --- or end)
+        # 提取该条目到下一个 ### 或 ---
         start = match.end()
-        next_section = re.search(r"\n(?:###|---|\*\*)", content[start:])
-        end = start + next_section.start() if next_section else len(content)
-        block = content[start:end]
+        next_section = re.search(r"\n###|\n---", text[start:])
+        end = start + next_section.start() if next_section else len(text)
+        body = text[start:end]
 
-        # Parse fields
+        # 解析字段
         trade = {
             "trade_num": trade_num,
-            "title": trade_title,
-            "action": None,
-            "shares": None,
-            "price": None,
-            "currency": "HKD",
-            "date": None,
-            "status": None,
-            "notes": "",
-            "p_l": None,
-            "realized_gain": None,
+            "title": title,
+            "body": body,
         }
 
-        # Extract action line
-        action_match = re.search(
-            r"- Action:\s*(BUY|SELL)\s*([\d,]+)\s*shares?\s*@\s*(?:USD|US|HK|CNY|A\$)?\$?([\d.,]+)",
-            block,
-        )
+        # 提取 Action
+        action_match = re.search(r"- Action:\s*(.+)", body)
         if action_match:
-            trade["action"] = action_match.group(1)
-            trade["shares"] = int(action_match.group(2).replace(",", ""))
-            trade["price"] = float(action_match.group(3).replace(",", ""))
+            trade["action_raw"] = action_match.group(1).strip()
 
-        # Extract date
-        date_match = re.search(r"- Date:\s*(\d{4}-\d{2}-\d{2})", block)
+        # 提取 Date
+        date_match = re.search(r"- Date:\s*(.+)", body)
         if date_match:
-            trade["date"] = date_match.group(1)
+            trade["date_raw"] = date_match.group(1).strip()
 
-        # Extract status
-        status_match = re.search(r"- Status:\s*(OPEN|CLOSED)", block)
+        # 提取 Status
+        status_match = re.search(r"- Status:\s*(.+)", body)
         if status_match:
-            trade["status"] = status_match.group(1)
+            trade["status_raw"] = status_match.group(1).strip()
 
-        # Extract P/L
-        pl_match = re.search(r"- P/L:\s*([+-][\d.]+)%", block)
-        if pl_match:
-            trade["p_l"] = float(pl_match.group(1))
-
-        # Extract realized gain
-        gain_match = re.search(r"- Realized gain:\s*(?:HK\$|CNY)?([+-][\d,]+(?:\.\d+)?)", block)
-        if not gain_match:
-            gain_match = re.search(r"Realized gain:\s*(?:HK\$|CNY)?([+-][\d,]+(?:\.\d+)?)", block)
-        if gain_match:
-            trade["realized_gain"] = float(gain_match.group(1).replace(",", ""))
-
-        # Extract realized loss
-        loss_match = re.search(r"- Realized loss:\s*(?:HK\$|CNY)?([+-][\d,]+(?:\.\d+)?)", block)
-        if not loss_match:
-            loss_match = re.search(r"Realized loss:\s*(?:HK\$|CNY)?([+-][\d,]+(?:\.\d+)?)", block)
-        if loss_match:
-            trade["realized_gain"] = float(loss_match.group(1).replace(",", ""))
-
-        # Extract notes
-        notes_match = re.search(r"- Notes:\s*(.+?)(?:\n|$)", block)
+        # 提取 Notes
+        notes_match = re.search(r"- Notes:\s*(.+)", body)
         if notes_match:
             trade["notes"] = notes_match.group(1).strip()
 
-        # Extract closed via
-        closed_match = re.search(r"- Closed via:\s*(.+?)(?:\n|$)", block)
-        if closed_match:
-            trade["closed_via"] = closed_match.group(1).strip()
+        # 提取 P/L
+        pl_match = re.search(r"- P/L:\s*(.+)", body)
+        if pl_match:
+            trade["pl_raw"] = pl_match.group(1).strip()
 
-        # Determine currency from action line
-        if "USD" in block or "US$" in block:
-            trade["currency"] = "USD"
-        elif "CNY" in block:
-            trade["currency"] = "CNY"
-        elif "A$" in block:
-            trade["currency"] = "AUD"
-
-        # Parse ticker name from title
-        # Title format: "Name (TICKER) optional" or just "Name"
-        ticker_match = re.match(r"(.+?)\s*\(([^)]+)\)", trade_title)
-        if ticker_match:
-            trade["name"] = ticker_match.group(1).strip()
-            trade["ticker_hint"] = ticker_match.group(2).strip()
-        else:
-            trade["name"] = trade_title
-            trade["ticker_hint"] = None
+        # 提取 Realized
+        realized_match = re.search(r"- Realized (?:gain|P/L|loss):\s*(.+)", body)
+        if realized_match:
+            trade["realized"] = realized_match.group(1).strip()
 
         trades.append(trade)
 
     return trades
 
 
-def make_decision_id(trade_num):
-    """Generate a deterministic decision_id from trade number."""
-    return hashlib.md5(f"trade-log-{trade_num:03d}".encode()).hexdigest()[:8]
+def resolve_ticker(title: str) -> str | None:
+    """从标题中推断 ticker。"""
+    # 尝试从括号中提取 ticker
+    ticker_match = re.search(r"\(([A-Za-z0-9.]+(?:\.HK|\.SH|\.SZ|\.AX|\.SS)?)\)", title)
+    if ticker_match:
+        code = ticker_match.group(1)
+        # 如果是纯数字且5位，加上.HK
+        if code.isdigit() and len(code) == 5:
+            code = code.lstrip("0") or "0"
+            return f"{code}.HK"
+        # 检查已知 ticker
+        for key in TICKER_MAP:
+            if code in key or key in code:
+                return key
+        return code
+
+    # 尝试名称匹配
+    for name, ticker in NAME_TICKER_MAP.items():
+        if name.lower() in title.lower():
+            return ticker
+    return None
 
 
-def build_decision_record(trade, company_scores):
-    """Convert a parsed trade dict into a decision_log row dict."""
-    name = trade["name"]
+def parse_action(action_raw: str) -> tuple[str, int, float, str]:
+    """从 action_raw 解析 (action, shares, price, currency)。
 
-    # Resolve ticker
-    ticker, market, company_name, default_currency = resolve_ticker(name)
-    currency = trade["currency"] if trade["currency"] != "UNKNOWN" else default_currency
+    格式示例:
+        BUY 1,800 shares @ USD$6.29
+        BUY 23,600 shares @ HK$23.19
+        SELL 400 shares @ HK$68.35
+        BUY 500 shares @ CNY8.948 (~HK$10.25)
+        BUY 700 shares @ CNY36.109
+        SELL 100 shares @ HK$125.30
+        BUY 300 shares @ CNY35.57 (6/30) -> SELL 300 shares @ CNY36.82 (7/3)
+    """
+    action = "BUY"
+    shares = 0
+    price = 0.0
+    currency = "HKD"
 
-    # Calculate amount
-    amount = 0.0
-    if trade["shares"] and trade["price"]:
-        amount = trade["shares"] * trade["price"]
+    # 判断买入/卖出
+    upper = action_raw.upper()
+    if "SELL" in upper.split()[0] or upper.startswith("SELL"):
+        action = "SELL"
+    elif "BUY" in upper.split()[0] or upper.startswith("BUY"):
+        action = "BUY"
+    elif "ADD" in upper:
+        action = "ADD"
+    elif "REDUCE" in upper:
+        action = "REDUCE"
 
-    # Determine action
-    action = trade.get("action", "BUY")
-    if action is None:
-        action = "BUY"  # default
-
-    # Status mapping
-    status = "open"
-    if trade.get("status") == "CLOSED":
-        status = "closed"
-
-    # actual_return_pct for closed trades
-    actual_return_pct = None
-    if status == "closed" and trade.get("p_l") is not None:
-        actual_return_pct = trade["p_l"]
-
-    # Look up dimension scores from company knowledge files
-    dim_scores = None
-    total_score = 0
-
-    # Try multiple ticker variants for lookup
-    lookup_keys = [ticker]
-    if trade.get("ticker_hint"):
-        lookup_keys.append(trade["ticker_hint"])
-
-    for key in lookup_keys:
-        if key in company_scores:
-            dim_scores = company_scores[key]
-            # Calculate total score
-            total_score = sum(
-                v["score"] for v in dim_scores.values() if isinstance(v, dict) and "score" in v
-            )
-            break
-
-    # Grade based on total score (if we have 7 dimensions max 35)
-    grade = ""
-    if total_score > 0:
-        if total_score >= 32:
-            grade = "A"
-        elif total_score >= 28:
-            grade = "B"
-        elif total_score >= 21:
-            grade = "C"
-        elif total_score >= 14:
-            grade = "D"
-        else:
-            grade = "F"
-
-    # Build reason from notes
-    reason = trade.get("notes", "")
-    if not reason:
-        reason = f"Trade #{trade['trade_num']}: {trade['title']}"
-
-    # Decision date
-    decision_date = trade.get("date", "2026-04-19")
-    if not decision_date:
-        decision_date = "2026-04-19"
-
-    # Build the record
-    record = {
-        "decision_id": make_decision_id(trade["trade_num"]),
-        "ticker": ticker,
-        "company_name": company_name,
-        "market": market,
-        "action": action,
-        "shares": trade.get("shares") or 0,
-        "price": trade.get("price") or 0.0,
-        "amount": amount,
-        "currency": currency,
-        "reason": reason,
-        "thesis": "",
-        "catalyst": "",
-        "risk_note": "",
-        "dimension_scores": json.dumps(dim_scores, ensure_ascii=False) if dim_scores else None,
-        "total_score": total_score,
-        "grade": grade,
-        "signal": "",
-        "signal_id": "",
-        "portfolio_pct": 0.0,
-        "expected_price_6m": 0.0,
-        "expected_price_12m": 0.0,
-        "expected_reasoning": "",
-        "actual_price_6m": 0.0,
-        "actual_price_12m": 0.0,
-        "actual_return_pct": actual_return_pct if actual_return_pct is not None else 0.0,
-        "review_notes": "",
-        "lessons": "",
-        "decision_date": decision_date,
-        "status": status,
-        "created_at": datetime.now().isoformat(),
-        "updated_at": datetime.now().isoformat(),
-    }
-
-    return record
-
-
-def main():
-    print("=" * 60)
-    print("Trade Log → Decision Log Migration")
-    print("=" * 60)
-
-    # Load company scores
-    print("\n[1] Loading company dimension scores from knowledge files...")
-    company_scores = load_company_scores()
-    print(f"    Loaded scores for {len(company_scores)} tickers: {list(company_scores.keys())}")
-
-    # Parse trade log
-    print("\n[2] Parsing trade-log.md...")
-    trades = parse_trade_log(TRADE_LOG)
-    print(f"    Found {len(trades)} trades")
-
-    # Build records
-    print("\n[3] Building decision records...")
-    records = []
-    for trade in trades:
-        record = build_decision_record(trade, company_scores)
-        records.append(record)
-
-    # Summary before insert
-    buy_count = sum(1 for r in records if r["action"] == "BUY")
-    sell_count = sum(1 for r in records if r["action"] == "SELL")
-    open_count = sum(1 for r in records if r["status"] == "open")
-    closed_count = sum(1 for r in records if r["status"] == "closed")
-    with_scores = sum(1 for r in records if r["total_score"] > 0)
-
-    print(f"    BUY: {buy_count}, SELL: {sell_count}")
-    print(f"    OPEN: {open_count}, CLOSED: {closed_count}")
-    print(f"    With dimension_scores: {with_scores}")
-
-    # Insert into DuckDB
-    print("\n[4] Inserting into decision_log...")
-    conn = duckdb.connect(DB_PATH)
-
-    # Check existing
-    existing = conn.execute("SELECT COUNT(*) FROM decision_log").fetchone()[0]
-    print(f"    Existing rows: {existing}")
-
-    # Delete any rows with our trade-log decision_ids to avoid duplicates
-    our_ids = [r["decision_id"] for r in records]
-    placeholders = ",".join(["?" for _ in our_ids])
-    result = conn.execute(
-        f"DELETE FROM decision_log WHERE decision_id IN ({placeholders})", our_ids
+    # 提取第一个 BUY/SELL 的数据（忽略 RE-BUY 复杂格式）
+    # 匹配: BUY 1,800 shares @ USD$6.29 或 BUY 23,600 shares @ HK$23.19
+    buy_sell = re.search(
+        r"(?:BUY|SELL)\s+([\d,]+)\s+shares?\s+@\s+(?:([A-Z]{2,3})\$?)?([\d.]+)",
+        action_raw,
     )
-    deleted_count = 0
-    try:
-        r = result.fetchone()
-        if r:
-            deleted_count = r[0]
-    except Exception:
-        pass
-    if deleted_count:
-        print(f"    Deleted {deleted_count} existing trade-log rows")
+    if buy_sell:
+        shares = int(buy_sell.group(1).replace(",", ""))
+        cur = buy_sell.group(2)
+        price = float(buy_sell.group(3))
+        if cur:
+            currency = cur
 
-    # Insert new records
-    cols = list(records[0].keys())
-    col_str = ",".join(cols)
-    placeholders = ",".join(["?" for _ in cols])
+    return action, shares, price, currency
 
-    for r in records:
-        vals = []
-        for c in cols:
-            v = r[c]
-            if v is None:
-                vals.append(None)
-            else:
-                vals.append(v)
-        conn.execute(
-            f"INSERT INTO decision_log ({col_str}) VALUES ({placeholders})", vals
-        )
 
-    new_count = conn.execute("SELECT COUNT(*) FROM decision_log").fetchone()[0]
-    print(f"    Inserted {len(records)} rows. Total now: {new_count}")
+def parse_date(date_raw: str) -> str:
+    """提取日期，返回 YYYY-MM-DD 格式。"""
+    # 匹配 2026-04-19 格式
+    iso_match = re.search(r"(\d{4}-\d{2}-\d{2})", date_raw)
+    if iso_match:
+        return iso_match.group(1)
 
-    # Print summary table
-    print("\n" + "=" * 60)
-    print("MIGRATION SUMMARY")
-    print("=" * 60)
-    print(f"{'#':<5} {'Ticker':<12} {'Action':<6} {'Shares':<8} {'Price':<10} {'Status':<8} {'P/L%':<8} {'Scores'}")
-    print("-" * 75)
-    for r in records:
-        pl_str = f"{r['actual_return_pct']:+.1f}%" if r["actual_return_pct"] else "-"
-        score_str = f"{r['total_score']}/35" if r["total_score"] > 0 else "-"
-        print(
-            f"{r['decision_id']:<5} {r['ticker']:<12} {r['action']:<6} {r['shares']:<8} "
-            f"{r['price']:<10.2f} {r['status']:<8} {pl_str:<8} {score_str}"
-        )
+    # 匹配 2026/04/19 格式
+    slash_match = re.search(r"(\d{4}/\d{2}/\d{2})", date_raw)
+    if slash_match:
+        return slash_match.group(1).replace("/", "-")
 
-    conn.close()
-    print(f"\n✅ Migration complete: {len(records)} trades → decision_log")
+    return ""
+
+
+def convert_to_decision(trade: dict) -> DecisionRecord | None:
+    """将原始交易条目转换为 DecisionRecord。"""
+    ticker = resolve_ticker(trade.get("title", ""))
+    if not ticker:
+        return None
+
+    company_name, market = TICKER_MAP.get(ticker, (trade.get("title", ""), ""))
+    currency = CURRENCY_MAP.get(market, "HKD")
+
+    action_raw = trade.get("action_raw", "")
+    if not action_raw:
+        return None
+
+    action, shares, price, cur = parse_action(action_raw)
+    if cur:
+        currency = cur
+
+    # SC 买入的用 CNY
+    body = trade.get("body", "")
+    if "SC" in body or "Stock Connect" in body:
+        if market == "A":
+            currency = "CNY"
+        # SC 买港股有时用 CNY
+        if "CNY" in action_raw:
+            currency = "CNY"
+
+    # 对于 SC 港股买入（CNY），需要转换为 HKD 用于 amount 计算
+    # 但 DecisionRecord 保持原始货币
+    amount = shares * price
+
+    decision_date = parse_date(trade.get("date_raw", ""))
+
+    # 推断 action type
+    action_type = action
+    if action == "BUY" and "batch" in trade.get("title", "").lower():
+        action_type = "ADD"
+    if action == "BUY" and "add" in trade.get("title", "").lower():
+        action_type = "ADD"
+    if action == "SELL" and "partial" in trade.get("title", "").lower():
+        action_type = "REDUCE"
+
+    rec = DecisionRecord(
+        ticker=ticker,
+        company_name=company_name,
+        market=market,
+        action=action_type,
+        shares=shares,
+        price=price,
+        amount=amount,
+        currency=currency,
+        reason=trade.get("notes", ""),
+        decision_date=decision_date,
+        status="closed" if "CLOSED" in trade.get("status_raw", "") else "active",
+    )
+
+    return rec
+
+
+def migrate(trade_log_path: Path = TRADE_LOG_PATH, db_path: Path = DEFAULT_DB, apply: bool = False):
+    """执行迁移。"""
+    print(f"解析 {trade_log_path} ...")
+    trades = parse_trade_log(trade_log_path)
+    print(f"找到 {len(trades)} 条交易记录\n")
+
+    # 转换
+    records: list[DecisionRecord] = []
+    skipped: list[tuple[int, str]] = []
+
+    for trade in trades:
+        rec = convert_to_decision(trade)
+        if rec:
+            # 使用 trade_num 作为 decision_id 前缀
+            rec.decision_id = f"TL-{trade['trade_num']:03d}"
+            records.append(rec)
+        else:
+            skipped.append((trade["trade_num"], trade["title"]))
+
+    print(f"成功转换: {len(records)} 条")
+    print(f"跳过: {len(skipped)} 条")
+    if skipped:
+        print("  跳过的条目:")
+        for num, title in skipped:
+            print(f"    #{num}: {title}")
+
+    # 打印摘要
+    print(f"\n{'='*60}")
+    print(f"  迁移预览")
+    print(f"{'='*60}")
+    for rec in records[:10]:
+        print(f"  {rec.decision_id} | {rec.decision_date} | {rec.action:5s} | "
+              f"{rec.ticker:12s} | {rec.shares:>6d}股 @ {rec.currency}{rec.price:.2f}")
+    if len(records) > 10:
+        print(f"  ... 还有 {len(records)-10} 条")
+
+    if not apply:
+        print(f"\n[试运行] 使用 --apply 参数实际写入 {db_path}")
+        return
+
+    # 写入
+    print(f"\n写入 {db_path} ...")
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    log = DecisionLog(str(db_path))
+
+    success = 0
+    failed = 0
+    for rec in records:
+        result = log.record(rec, enforce_constraints=False)
+        if result["accepted"]:
+            success += 1
+        else:
+            failed += 1
+            print(f"  写入失败 {rec.decision_id}: {result['violations']}")
+
+    print(f"\n完成: {success} 成功, {failed} 失败")
+
+    # 验证
+    stats = log.get_stats()
+    print(f"数据库统计: {stats}")
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description="迁移 trade-log.md 到决策日志")
+    parser.add_argument("--apply", action="store_true", help="实际写入(默认仅预览)")
+    parser.add_argument("--db", default=str(DEFAULT_DB), help="DuckDB 路径")
+    parser.add_argument("--trade-log", default=str(TRADE_LOG_PATH), help="trade-log.md 路径")
+    args = parser.parse_args()
+
+    migrate(
+        trade_log_path=Path(args.trade_log),
+        db_path=Path(args.db),
+        apply=args.apply,
+    )
