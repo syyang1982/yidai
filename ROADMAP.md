@@ -54,6 +54,7 @@
 | W2.1.1 | 决策记录结构 | 设计 JSON schema：ticker、动作、价格、理由、预期、七维评分快照 | ✅ `src/strategy/decision.py` |
 | W2.1.2 | `manage.py decision` 命令 | 交互式记录买入/卖出/持有决策 | ✅ add/list/show/review/outcome/stats |
 | W2.1.3 | 与 trade-log.md 整合 | 迁移现有交易记录到结构化格式 | ✅ `scripts/migrate_trades.py` (41条交易) |
+| W2.1.4 | 历史决策补录 | 从trade-log.md + 公司分析文件补录41条决策到decisions.duckdb | ✅ `scripts/backfill_decisions.py` |
 
 ### 2.2 预期验证
 
@@ -144,6 +145,49 @@
 
 ---
 
+## 模块九：决策反馈闭环增强 ✅ 已完成 (2026-09-13)
+
+> **目标：** 建立长期持续的反馈闭环，提高决策质量
+> **核心思路：** 标准化分类→缩短反馈周期→周报集成→认知偏差检测
+
+### 9.1 决策理由分类学 (P1)
+
+| # | 工作项 | 描述 | 状态 |
+|---|--------|------|------|
+| W9.1.1 | 分类模块 | `src/strategy/reason_taxonomy.py` — 10种催化剂类型 + 8种卖出原因 | ✅ |
+| W9.1.2 | DecisionRecord扩展 | 新增 reason_category + sell_reason 字段 | ✅ |
+| W9.1.3 | 迁移脚本 | `scripts/migrate_reason_categories.py` — 41条记录已分类 | ✅ |
+| W9.1.4 | 测试 | `tests/test_reason_taxonomy.py` — 5 tests | ✅ |
+
+**reason_category 分布:** 组合再平衡(19), 低位机会(10), 获利了结(6), 止损/清仓(5), 技术形态(1)
+
+### 9.2 快速反馈周期 (P2)
+
+| # | 工作项 | 描述 | 状态 |
+|---|--------|------|------|
+| W9.2.1 | 1周/1月快检 | review_engine.py 新增 `quick_review()` + `get_quick_review_stats()` | ✅ |
+| W9.2.2 | DecisionRecord扩展 | 新增 expected_price_1w/1m + actual_price_1w/1m 字段 | ✅ |
+
+### 9.3 周报复盘区块 (P3)
+
+| # | 工作项 | 描述 | 状态 |
+|---|--------|------|------|
+| W9.3.1 | 复盘区块 | weekly_v2.py `_render_decision_review()` — 4个子区块 | ✅ |
+
+**区块内容:** 🆕本周新增决策 → ⏰到期快检(1w/1m) → 📈累计决策胜率 → 💡最近教训
+
+### 9.4 认知偏差检测 (P4)
+
+| # | 工作项 | 描述 | 状态 |
+|---|--------|------|------|
+| W9.4.1 | 偏差字段 | DecisionRecord 新增 confidence_level/counter_argument/regret_flag/market_regime | ✅ |
+| W9.4.2 | 偏差检测 | review_engine.py `analyze_cognitive_biases()` — 3种模式 | ✅ |
+| W9.4.3 | 偏差报告 | `format_bias_report()` 格式化输出 | ✅ |
+
+**偏差模式:** 过度自信(高信心+亏损), 逆向成功(低信心+大赚), 缺失反面论据(无论据+亏损)
+
+---
+
 ## 待做事项
 
 | # | 工作项 | 描述 | 状态 |
@@ -168,4 +212,6 @@
 | 2026-08-28 | 📋 模块六/七/八规划完成 — 信号准确率审计+领先指标追踪+组合约束层 |
 
 | 2026-09-09 | ✅ W2.1.3 trade-log迁移脚本 (41条交易→DuckDB决策日志) |
-| 2026-09-09 | ✅ W2.3.1 阈值校准模块 (157条信号分析, 发现市场环境自适应需求) |
+|| 2026-09-09 | ✅ W2.3.1 阈值校准模块 (157条信号分析, 发现市场环境自适应需求) ||
+|| 2026-09-13 | ✅ W2.1.4 历史决策补录 (41条交易→decisions.duckdb, 37条含七维评分) ||
+|| 2026-09-13 | ✅ 模块九：决策反馈闭环 (P1理由分类学+P2快检+P3周报集成+P4认知偏差) ||

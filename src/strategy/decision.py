@@ -40,6 +40,8 @@ class DecisionRecord:
 
     # 决策理由
     reason: str = ""              # 简短理由（一句话）
+    reason_category: str = ""     # 买入催化剂分类（ReasonCategory 枚举值）
+    sell_reason: str = ""         # 卖出原因分类（SellReason 枚举值，SELL/REDUCE 时填）
     thesis: str = ""              # 完整投资论点
     catalyst: str = ""            # 催化剂 / 触发因素
     risk_note: str = ""           # 风险提示
@@ -56,16 +58,26 @@ class DecisionRecord:
     portfolio_pct: float = 0.0    # 该笔交易后，此标的占总持仓的百分比
 
     # 预期
+    expected_price_1w: float = 0.0   # 1周后预期价格（快速反馈）
+    expected_price_1m: float = 0.0   # 1个月后预期价格（快速反馈）
     expected_price_6m: float = 0.0   # 6个月后预期价格
     expected_price_12m: float = 0.0  # 12个月后预期价格
     expected_reasoning: str = ""     # 预期逻辑
 
     # 实际结果（后续填写）
+    actual_price_1w: float = 0.0
+    actual_price_1m: float = 0.0
     actual_price_6m: float = 0.0
     actual_price_12m: float = 0.0
     actual_return_pct: float = 0.0   # 实际收益率
     review_notes: str = ""           # 复盘笔记
     lessons: str = ""                # 经验教训
+
+    # 认知偏差追踪（用于复盘时识别决策偏见）
+    confidence_level: int = 0     # 决策时信心水平 1-5（1=非常不确定, 5=非常确定）
+    counter_argument: str = ""    # 考虑过的反面论据（为空可能说明锚定偏差）
+    regret_flag: bool = False     # 复盘时标记：是否后悔此决策
+    market_regime: str = ""       # 决策时市场环境："bull" / "bear" / "sideways" / "volatile"
 
     # 元数据
     decision_date: str = ""       # 决策日期（用户指定）
@@ -97,6 +109,8 @@ class DecisionLog:
                 amount DOUBLE,
                 currency VARCHAR,
                 reason VARCHAR,
+                reason_category VARCHAR,
+                sell_reason VARCHAR,
                 thesis VARCHAR,
                 catalyst VARCHAR,
                 risk_note VARCHAR,
@@ -106,20 +120,48 @@ class DecisionLog:
                 signal VARCHAR,
                 signal_id VARCHAR,
                 portfolio_pct DOUBLE,
+                expected_price_1w DOUBLE,
+                expected_price_1m DOUBLE,
                 expected_price_6m DOUBLE,
                 expected_price_12m DOUBLE,
                 expected_reasoning VARCHAR,
+                actual_price_1w DOUBLE,
+                actual_price_1m DOUBLE,
                 actual_price_6m DOUBLE,
                 actual_price_12m DOUBLE,
                 actual_return_pct DOUBLE,
                 review_notes VARCHAR,
                 lessons VARCHAR,
+                confidence_level INTEGER,
+                counter_argument VARCHAR,
+                regret_flag BOOLEAN,
+                market_regime VARCHAR,
                 decision_date DATE,
                 status VARCHAR,
                 created_at TIMESTAMP,
                 updated_at TIMESTAMP
             )
         """)
+        # 为已有数据库添加缺失列（如果已存在旧表则 ALTER）
+        table_exists = self.conn.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'decision_log'"
+        ).fetchone()
+        if table_exists and table_exists[0] > 0:
+            existing_cols = {r[3] for r in self.conn.execute(
+                "SELECT * FROM information_schema.columns WHERE table_name = 'decision_log'"
+            ).fetchall()}
+            for col, col_type in [
+                ("reason_category", "VARCHAR"), ("sell_reason", "VARCHAR"),
+                ("expected_price_1w", "DOUBLE"), ("expected_price_1m", "DOUBLE"),
+                ("actual_price_1w", "DOUBLE"), ("actual_price_1m", "DOUBLE"),
+                ("confidence_level", "INTEGER"), ("counter_argument", "VARCHAR"),
+                ("regret_flag", "BOOLEAN"), ("market_regime", "VARCHAR"),
+            ]:
+                if col not in existing_cols:
+                    try:
+                        self.conn.execute(f"ALTER TABLE decision_log ADD COLUMN {col} {col_type}")
+                    except Exception:
+                        pass  # 列已存在
 
     def _check_constraints(self, rec: DecisionRecord) -> tuple[list, list]:
         """返回 (warnings, violations)。warnings=软违规(仍记录), violations=硬违规(enforce时拒绝)。"""
@@ -192,21 +234,26 @@ class DecisionLog:
         self.conn.execute(
             """
             INSERT OR REPLACE INTO decision_log VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             [
                 rec.decision_id, rec.ticker, rec.company_name, rec.market,
                 rec.action, rec.shares, rec.price, rec.amount, rec.currency,
-                rec.reason, rec.thesis, rec.catalyst, rec.risk_note,
+                rec.reason, rec.reason_category, rec.sell_reason,
+                rec.thesis, rec.catalyst, rec.risk_note,
                 json.dumps(rec.dimension_scores, ensure_ascii=False),
                 rec.total_score, rec.grade, rec.signal, rec.signal_id,
                 rec.portfolio_pct,
+                rec.expected_price_1w, rec.expected_price_1m,
                 rec.expected_price_6m, rec.expected_price_12m, rec.expected_reasoning,
+                rec.actual_price_1w, rec.actual_price_1m,
                 rec.actual_price_6m, rec.actual_price_12m, rec.actual_return_pct,
                 rec.review_notes, rec.lessons,
+                rec.confidence_level, rec.counter_argument,
+                rec.regret_flag, rec.market_regime,
                 rec.decision_date, rec.status,
                 rec.created_at, rec.updated_at,
             ],
@@ -261,13 +308,29 @@ class DecisionLog:
         review_notes: str = "",
         lessons: str = "",
     ) -> bool:
-        """记录实际结果。period='6m' or '12m'。"""
+        """记录实际结果。period='1w' / '1m' / '6m' / '12m'。"""
         rec = self.get(decision_id)
         if not rec:
             return False
 
         now = datetime.now().isoformat()
-        if period == "6m":
+        if period == "1w":
+            self.conn.execute(
+                """UPDATE decision_log SET
+                    actual_price_1w = ?, review_notes = ?,
+                    status = 'reviewed_1w', updated_at = ?
+                WHERE decision_id = ?""",
+                [actual_price, review_notes, now, decision_id],
+            )
+        elif period == "1m":
+            self.conn.execute(
+                """UPDATE decision_log SET
+                    actual_price_1m = ?, review_notes = ?,
+                    status = 'reviewed_1m', updated_at = ?
+                WHERE decision_id = ?""",
+                [actual_price, review_notes, now, decision_id],
+            )
+        elif period == "6m":
             self.conn.execute(
                 """UPDATE decision_log SET
                     actual_price_6m = ?, review_notes = ?,
@@ -275,7 +338,7 @@ class DecisionLog:
                 WHERE decision_id = ?""",
                 [actual_price, review_notes, now, decision_id],
             )
-        else:
+        else:  # 12m
             # 计算收益率
             ret_pct = 0.0
             if rec.price > 0:
@@ -291,15 +354,31 @@ class DecisionLog:
         return True
 
     def get_pending_reviews(self, period: str = "6m") -> List[DecisionRecord]:
-        """获取需要复盘的决策。"""
-        if period == "6m":
+        """获取需要复盘的决策。支持 '1w' / '1m' / '6m' / '12m'。"""
+        period_map = {
+            "1w": ("active", "7 days"),
+            "1m": ("active", "1 month"),
+            "6m": ("active", "6 months"),
+            "12m": ("reviewed_6m", "12 months"),
+        }
+        status_req, interval = period_map.get(period, ("active", "6 months"))
+
+        if period in ("1w", "1m"):
+            # 快速复盘：只需 active 状态，且距决策日已达间隔
+            rows = self.conn.execute(
+                f"""SELECT * FROM decision_log
+                   WHERE status = 'active'
+                   AND decision_date <= CURRENT_DATE - INTERVAL '{interval}'
+                   ORDER BY decision_date""",
+            ).fetchall()
+        elif period == "6m":
             rows = self.conn.execute(
                 """SELECT * FROM decision_log
                    WHERE status = 'active'
                    AND decision_date <= CURRENT_DATE - INTERVAL '6 months'
                    ORDER BY decision_date""",
             ).fetchall()
-        else:
+        else:  # 12m
             rows = self.conn.execute(
                 """SELECT * FROM decision_log
                    WHERE status = 'reviewed_6m'
@@ -356,6 +435,10 @@ class DecisionLog:
             f"- **金额:** {rec.amount:,.0f} {rec.currency}",
             f"- **理由:** {rec.reason}",
         ]
+        if rec.reason_category:
+            lines.append(f"- **催化剂分类:** {rec.reason_category}")
+        if rec.sell_reason:
+            lines.append(f"- **卖出原因:** {rec.sell_reason}")
         if rec.thesis:
             lines.append(f"- **论点:** {rec.thesis}")
         if rec.catalyst:
@@ -367,6 +450,20 @@ class DecisionLog:
             lines.append(f"  - {scores_str}")
         if rec.portfolio_pct > 0:
             lines.append(f"- **持仓占比:** {rec.portfolio_pct:.1f}%")
+
+        # 认知偏差字段（决策时填写）
+        if rec.confidence_level > 0:
+            lines.append(f"- **信心水平:** {rec.confidence_level}/5")
+        if rec.counter_argument:
+            lines.append(f"- **反面论据:** {rec.counter_argument}")
+        if rec.market_regime:
+            regime_map = {"bull": "🐂 牛市", "bear": "🐻 熊市", "sideways": "↔️ 震荡", "volatile": "⚡ 波动"}
+            lines.append(f"- **市场环境:** {regime_map.get(rec.market_regime, rec.market_regime)}")
+
+        if rec.expected_price_1w > 0:
+            lines.append(f"- **1W预期:** {rec.expected_price_1w} {rec.currency}")
+        if rec.expected_price_1m > 0:
+            lines.append(f"- **1M预期:** {rec.expected_price_1m} {rec.currency}")
         if rec.expected_price_6m > 0:
             lines.append(f"- **6M预期:** {rec.expected_price_6m} {rec.currency}")
         if rec.expected_price_12m > 0:
@@ -375,6 +472,10 @@ class DecisionLog:
             lines.append(f"- **预期逻辑:** {rec.expected_reasoning}")
         if rec.status.startswith("reviewed"):
             lines.append(f"- **状态:** {rec.status}")
+            if rec.actual_price_1w > 0:
+                lines.append(f"- **1W实际:** {rec.actual_price_1w} {rec.currency}")
+            if rec.actual_price_1m > 0:
+                lines.append(f"- **1M实际:** {rec.actual_price_1m} {rec.currency}")
             if rec.actual_price_6m > 0:
                 lines.append(f"- **6M实际:** {rec.actual_price_6m} {rec.currency}")
             if rec.actual_price_12m > 0:
@@ -385,5 +486,8 @@ class DecisionLog:
                 lines.append(f"- **复盘:** {rec.review_notes}")
             if rec.lessons:
                 lines.append(f"- **教训:** {rec.lessons}")
+            # 复盘时的偏差标记
+            if rec.regret_flag:
+                lines.append(f"- **⚠️ 后悔标记:** 是")
 
         return "\n".join(lines)

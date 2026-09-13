@@ -154,7 +154,7 @@ class ReviewEngine:
         Args:
             decision_id: 决策ID
             actual_price: 实际价格（如果为0，尝试用fetch_current_fn获取）
-            period: "6m" or "12m"
+            period: "1w" / "1m" / "6m" / "12m"
             fetch_current_fn: 可选的获取当前价格函数 ticker -> price
 
         Returns:
@@ -165,8 +165,12 @@ class ReviewEngine:
         if not rec:
             return None
 
-        # Determine expected price
-        if period == "6m":
+        # Determine expected price — 短周期没有预期价格时用 entry price
+        if period == "1w":
+            expected = rec.expected_price_1w if rec.expected_price_1w > 0 else 0
+        elif period == "1m":
+            expected = rec.expected_price_1m if rec.expected_price_1m > 0 else 0
+        elif period == "6m":
             expected = rec.expected_price_6m
         else:
             expected = rec.expected_price_12m
@@ -189,7 +193,7 @@ class ReviewEngine:
         if expected > 0:
             price_acc = max(0, 1 - abs(actual_price - expected) / expected)
 
-        direction_ok = (actual_price > entry) == (expected > entry) if expected > 0 else False
+        direction_ok = (actual_price > entry) == (expected > entry) if expected > 0 else (actual_price > entry)
         beat = actual_price >= expected if expected > 0 else False
 
         result = ReviewResult(
@@ -258,6 +262,89 @@ class ReviewEngine:
                 if r:
                     results.append(r)
         return results
+
+    def quick_review(
+        self,
+        period: str = "1w",
+        fetch_current_fn=None,
+    ) -> List[ReviewResult]:
+        """快速复盘：对所有到期的短周期决策进行回检。
+
+        适用于每周/每月运行，提供快速反馈循环。
+        与 batch_review 的区别：quick_review 只处理 1w/1m 短周期。
+
+        Args:
+            period: "1w" 或 "1m"
+            fetch_current_fn: 获取当前价格函数 ticker -> price
+
+        Returns:
+            回检结果列表
+        """
+        if period not in ("1w", "1m"):
+            period = "1w"  # 默认1周
+
+        dl = self._get_decision_log()
+        pending = dl.get_pending_reviews(period)
+
+        results = []
+        for rec in pending:
+            if fetch_current_fn:
+                try:
+                    price = fetch_current_fn(rec.ticker)
+                except Exception:
+                    continue
+                r = self.review_decision(rec.decision_id, price, period)
+                if r:
+                    results.append(r)
+        return results
+
+    def get_quick_review_stats(self, period: str = "1w") -> dict:
+        """获取短周期复盘统计。
+
+        Args:
+            period: "1w" 或 "1m"
+
+        Returns:
+            包含 avg_return, direction_accuracy 等指标的字典
+        """
+        total = self.conn.execute(
+            "SELECT COUNT(*) FROM review_results WHERE expected_period = ?",
+            [period]
+        ).fetchone()[0]
+        if total == 0:
+            return {
+                "period": period,
+                "total_reviews": 0,
+                "avg_return": 0,
+                "direction_accuracy": 0,
+                "positive_rate": 0,
+            }
+
+        avg_ret = self.conn.execute(
+            """SELECT AVG(actual_return_pct) FROM review_results
+               WHERE expected_period = ? AND actual_return_pct != 0""",
+            [period]
+        ).fetchone()[0]
+
+        dir_correct = self.conn.execute(
+            """SELECT COUNT(*) FROM review_results
+               WHERE expected_period = ? AND direction_correct = true""",
+            [period]
+        ).fetchone()[0]
+
+        positive = self.conn.execute(
+            """SELECT COUNT(*) FROM review_results
+               WHERE expected_period = ? AND actual_return_pct > 0""",
+            [period]
+        ).fetchone()[0]
+
+        return {
+            "period": period,
+            "total_reviews": total,
+            "avg_return": round(avg_ret, 2) if avg_ret else 0,
+            "direction_accuracy": round(dir_correct / total * 100, 1) if total else 0,
+            "positive_rate": round(positive / total * 100, 1) if total else 0,
+        }
 
     def analyze_dimension_effectiveness(self) -> List[DimensionEffectiveness]:
         """分析哪些评分维度有预测力。
@@ -452,3 +539,158 @@ class ReviewEngine:
             )
 
         return "\n".join(lines)
+
+    def analyze_cognitive_biases(self) -> List[BiasPattern]:
+        """检测决策日志中的认知偏差模式。
+
+        检测三种偏差模式：
+        1. 过度自信：信心>=4 且 实际收益<-10%
+        2. 逆向成功：信心<=2 且 实际收益>+10%（低信心反而赚大钱）
+        3. 缺失反面论据：counter_argument为空 且 结果为负
+
+        Returns:
+            List[BiasPattern]
+        """
+        patterns: List[BiasPattern] = []
+        dl = self._get_decision_log()
+        conn = dl.conn
+
+        # 1. 过度自信模式：高信心 + 亏损
+        rows = conn.execute("""
+            SELECT decision_id, ticker, company_name, action, decision_date,
+                   confidence_level, actual_return_pct, counter_argument
+            FROM decision_log
+            WHERE confidence_level >= 4
+              AND actual_return_pct < -10
+              AND actual_return_pct != 0
+            ORDER BY actual_return_pct ASC
+        """).fetchall()
+
+        if rows:
+            avg_ret = sum(r[6] for r in rows) / len(rows)
+            examples = [
+                {"decision_id": r[0], "ticker": r[1], "company_name": r[2],
+                 "confidence": r[5], "return_pct": round(r[6], 1)}
+                for r in rows[:5]
+            ]
+            patterns.append(BiasPattern(
+                pattern_type="overconfidence",
+                pattern_name="过度自信",
+                description=f"信心≥4但亏损>10%，共{len(rows)}笔。平均亏损{avg_ret:.1f}%——高信心不等于高准确率，需警惕确认偏差。",
+                count=len(rows),
+                avg_return=round(avg_ret, 2),
+                examples=examples,
+            ))
+
+        # 2. 逆向成功模式：低信心 + 大赚
+        rows = conn.execute("""
+            SELECT decision_id, ticker, company_name, action, decision_date,
+                   confidence_level, actual_return_pct, counter_argument
+            FROM decision_log
+            WHERE confidence_level <= 2
+              AND confidence_level > 0
+              AND actual_return_pct > 10
+            ORDER BY actual_return_pct DESC
+        """).fetchall()
+
+        if rows:
+            avg_ret = sum(r[6] for r in rows) / len(rows)
+            examples = [
+                {"decision_id": r[0], "ticker": r[1], "company_name": r[2],
+                 "confidence": r[5], "return_pct": round(r[6], 1)}
+                for r in rows[:5]
+            ]
+            patterns.append(BiasPattern(
+                pattern_type="contrarian_success",
+                pattern_name="逆向成功",
+                description=f"信心≤2但收益>10%，共{len(rows)}笔。平均收益{avg_ret:.1f}%——低信心决策反而表现好，说明直觉可能比分析更准，或存在处置效应。",
+                count=len(rows),
+                avg_return=round(avg_ret, 2),
+                examples=examples,
+            ))
+
+        # 3. 缺失反面论据：没写counter_argument + 亏损
+        rows = conn.execute("""
+            SELECT decision_id, ticker, company_name, action, decision_date,
+                   confidence_level, actual_return_pct, counter_argument
+            FROM decision_log
+            WHERE (counter_argument IS NULL OR counter_argument = '')
+              AND actual_return_pct < -5
+              AND actual_return_pct != 0
+            ORDER BY actual_return_pct ASC
+        """).fetchall()
+
+        if rows:
+            avg_ret = sum(r[6] for r in rows) / len(rows)
+            examples = [
+                {"decision_id": r[0], "ticker": r[1], "company_name": r[2],
+                 "return_pct": round(r[6], 1)}
+                for r in rows[:5]
+            ]
+            patterns.append(BiasPattern(
+                pattern_type="missing_counter_argument",
+                pattern_name="缺失反面论据",
+                description=f"未写反面论据且亏损>5%，共{len(rows)}笔。平均亏损{avg_ret:.1f}%——未考虑反面论据可能意味着锚定偏差或确认偏差。",
+                count=len(rows),
+                avg_return=round(avg_ret, 2),
+                examples=examples,
+            ))
+
+        return patterns
+
+    def format_bias_report(self, patterns: List[BiasPattern]) -> str:
+        """将认知偏差检测结果格式化为 Markdown。"""
+        if not patterns:
+            return "  ✅ 暂未检测到明显认知偏差模式（数据量可能不足）\n"
+
+        lines = ["### 🧠 认知偏差分析报告\n"]
+
+        for p in patterns:
+            icon = {
+                "overconfidence": "🔴",
+                "contrarian_success": "🟢",
+                "missing_counter_argument": "🟡",
+            }.get(p.pattern_type, "⚪")
+
+            lines.append(f"#### {icon} {p.pattern_name}")
+            lines.append(f"- **命中数:** {p.count}笔")
+            lines.append(f"- **平均收益:** {p.avg_return:+.1f}%")
+            lines.append(f"- **分析:** {p.description}")
+
+            if p.examples:
+                lines.append("- **典型案例:**")
+                for ex in p.examples:
+                    ticker = ex.get("ticker", "?")
+                    name = ex.get("company_name", "?")
+                    ret = ex.get("return_pct", 0)
+                    conf = ex.get("confidence", "?")
+                    if p.pattern_type == "missing_counter_argument":
+                        lines.append(f"  - {name}({ticker}): 收益{ret:+.1f}%")
+                    else:
+                        lines.append(f"  - {name}({ticker}): 信心{conf}/5, 收益{ret:+.1f}%")
+            lines.append("")
+
+        # 综合建议
+        lines.append("#### 💡 改进建议")
+        has_overconfidence = any(p.pattern_type == "overconfidence" for p in patterns)
+        has_missing = any(p.pattern_type == "missing_counter_argument" for p in patterns)
+
+        if has_overconfidence:
+            lines.append("- 🔴 过度自信：高信心决策前做「魔鬼辩护」，列出3个会失败的理由")
+        if has_missing:
+            lines.append("- 🟡 缺失反面论据：强制要求每个决策填写counter_argument字段")
+        if any(p.pattern_type == "contrarian_success" for p in patterns):
+            lines.append("- 🟢 逆向成功：低信心时反而赚大钱，考虑是否过度分析导致分析瘫痪")
+
+        return "\n".join(lines)
+
+
+@dataclass
+class BiasPattern:
+    """认知偏差检测结果。"""
+    pattern_type: str         # "overconfidence" / "contrarian_success" / "missing_counter_argument"
+    pattern_name: str         # 中文名称
+    description: str          # 偏差描述
+    count: int = 0            # 命中该模式的决策数量
+    avg_return: float = 0.0   # 命中决策的平均收益率
+    examples: list = field(default_factory=list)  # 典型案例

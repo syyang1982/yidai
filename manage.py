@@ -821,11 +821,39 @@ def cmd_decision(args):
             decision_date=args.date or date.today().isoformat(),
         )
 
+        # ── 必填：信心程度 + 反面论据 ──
+        if hasattr(args, 'confidence') and args.confidence:
+            rec.confidence_level = args.confidence
+        else:
+            while True:
+                try:
+                    conf = input("  📊 信心程度 (1-5，1=没底 5=非常确定): ").strip()
+                    if conf in ('1','2','3','4','5'):
+                        rec.confidence_level = int(conf)
+                        break
+                    print("  请输入 1-5 的数字")
+                except (EOFError, KeyboardInterrupt):
+                    print("\n  跳过")
+                    break
+
+        if hasattr(args, 'counter_argument') and args.counter_argument:
+            rec.counter_argument = args.counter_argument
+        else:
+            try:
+                counter = input("  🔄 反面论据 (做这笔决策前你想过的反对理由，一句话): ").strip()
+                rec.counter_argument = counter if counter else ""
+            except (EOFError, KeyboardInterrupt):
+                print("\n  跳过")
+
         did = log.record(rec)
         print(f"\n  ✅ 决策已记录: {did}")
         print(f"  {company_name} ({ticker}) {rec.action} {rec.shares}股 @ {rec.price} {rec.currency}")
         if total_score > 0:
             print(f"  评分: {total_score}/35 ({grade}, {signal})")
+        if rec.confidence_level:
+            print(f"  信心: {rec.confidence_level}/5")
+        if rec.counter_argument:
+            print(f"  反面论据: {rec.counter_argument}")
         print(f"\n  查看: python manage.py decision show {did}")
         return
 
@@ -1558,6 +1586,8 @@ def main():
     p_decision.add_argument("--expect-6m", type=float, dest="expect_6m", help="6个月预期价格")
     p_decision.add_argument("--expect-12m", type=float, dest="expect_12m", help="12个月预期价格")
     p_decision.add_argument("--expect-reason", help="预期逻辑")
+    p_decision.add_argument("--confidence", type=int, choices=[1,2,3,4,5], help="信心程度 (1-5)")
+    p_decision.add_argument("--counter-argument", dest="counter_argument", help="反面论据")
     p_decision.add_argument("--date", help="决策日期 (YYYY-MM-DD)")
     p_decision.add_argument("--decision-id", dest="decision_id", help="决策ID (show/outcome)")
     p_decision.add_argument("--actual-price", type=float, dest="actual_price", help="实际价格")

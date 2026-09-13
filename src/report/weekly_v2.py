@@ -45,6 +45,11 @@ try:
 except ImportError:  # pragma: no cover
     SignalTracker = None  # type: ignore
 
+try:
+    from src.strategy.decision import DecisionLog
+except ImportError:  # pragma: no cover
+    DecisionLog = None  # type: ignore
+
 
 # ---------------------------------------------------------------------------
 # Grade boundary helpers
@@ -326,6 +331,257 @@ def _render_action_items(
 
 
 # ---------------------------------------------------------------------------
+# Decision review renderer
+# ---------------------------------------------------------------------------
+
+_ACTION_CN = {
+    "BUY": "买入",
+    "SELL": "卖出",
+    "REDUCE": "减仓",
+    "ADD": "加仓",
+    "HOLD": "持有",
+}
+
+
+def _render_decision_review(
+    decision_db_path: str,
+    today: date,
+) -> str:
+    """渲染决策复盘区块：本周新增、到期快检、累计胜率、最近教训。"""
+    lines: List[str] = []
+    lines.append("# 📊 决策复盘")
+    lines.append("")
+
+    if DecisionLog is None or not os.path.isfile(decision_db_path):
+        lines.append("*决策日志不可用。*")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        return "\n".join(lines)
+
+    try:
+        dl = DecisionLog(decision_db_path)
+    except Exception:
+        lines.append("*决策日志打开失败。*")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        return "\n".join(lines)
+
+    has_content = False
+    week_ago = (today - timedelta(days=7)).isoformat()
+    month_later = today + timedelta(days=30)
+    week_later = today + timedelta(days=7)
+
+    # ---- 1. 本周新增决策 ----
+    try:
+        new_decisions = dl.conn.execute(
+            """SELECT decision_id, ticker, company_name, action, reason,
+                      total_score, grade, decision_date, price
+               FROM decision_log
+               WHERE decision_date >= ?
+               ORDER BY decision_date DESC""",
+            [week_ago],
+        ).fetchall()
+    except Exception:
+        new_decisions = []
+
+    if new_decisions:
+        has_content = True
+        lines.append("## 🆕 本周新增决策")
+        lines.append("")
+        lines.append("| 日期 | 标的 | 操作 | 理由 | 评分 |")
+        lines.append("|------|------|------|------|------|")
+        for row in new_decisions:
+            _did, ticker, name, action, reason, score, grade, ddate, price = row
+            act_cn = _ACTION_CN.get(action, action)
+            lines.append(
+                f"| {ddate} "
+                f"| {name or ticker} ({ticker}) "
+                f"| {act_cn} "
+                f"| {reason or '—'} "
+                f"| {score}/40 ({grade}) |"
+            )
+        lines.append("")
+
+    # ---- 2. 到期快检 (1周 / 1月) ----
+    try:
+        # 1周快检：决策日期在 (today-8d, today-6d) 范围，即正好约1周前
+        w1_start = (today - timedelta(days=8)).isoformat()
+        w1_end = (today - timedelta(days=6)).isoformat()
+        due_1w = dl.conn.execute(
+            """SELECT decision_id, ticker, company_name, action, price,
+                      expected_price_6m, decision_date, total_score
+               FROM decision_log
+               WHERE decision_date BETWEEN ? AND ?
+               AND status = 'active'
+               ORDER BY decision_date""",
+            [w1_start, w1_end],
+        ).fetchall()
+
+        # 1月快检：决策日期在 (today-31d, today-29d) 范围
+        m1_start = (today - timedelta(days=31)).isoformat()
+        m1_end = (today - timedelta(days=29)).isoformat()
+        due_1m = dl.conn.execute(
+            """SELECT decision_id, ticker, company_name, action, price,
+                      expected_price_6m, decision_date, total_score
+               FROM decision_log
+               WHERE decision_date BETWEEN ? AND ?
+               AND status = 'active'
+               ORDER BY decision_date""",
+            [m1_start, m1_end],
+        ).fetchall()
+    except Exception:
+        due_1w = []
+        due_1m = []
+
+    if due_1w or due_1m:
+        has_content = True
+        lines.append("## ⏰ 到期快检")
+        lines.append("")
+
+        if due_1w:
+            lines.append("### 📅 1周回顾")
+            lines.append("")
+            lines.append("| 标的 | 操作 | 入场价 | 6M预期 | 总分 |")
+            lines.append("|------|------|--------|--------|------|")
+            for row in due_1w:
+                _did, ticker, name, action, price, exp6m, ddate, score = row
+                act_cn = _ACTION_CN.get(action, action)
+                lines.append(
+                    f"| {name or ticker} ({ticker}) "
+                    f"| {act_cn} "
+                    f"| {price} "
+                    f"| {exp6m or '—'} "
+                    f"| {score}/40 |"
+                )
+            lines.append("")
+
+        if due_1m:
+            lines.append("### 📅 1月回顾")
+            lines.append("")
+            lines.append("| 标的 | 操作 | 入场价 | 6M预期 | 总分 |")
+            lines.append("|------|------|--------|--------|------|")
+            for row in due_1m:
+                _did, ticker, name, action, price, exp6m, ddate, score = row
+                act_cn = _ACTION_CN.get(action, action)
+                lines.append(
+                    f"| {name or ticker} ({ticker}) "
+                    f"| {act_cn} "
+                    f"| {price} "
+                    f"| {exp6m or '—'} "
+                    f"| {score}/40 |"
+                )
+            lines.append("")
+
+    # ---- 3. 累计决策胜率 ----
+    try:
+        total_decisions = dl.conn.execute(
+            "SELECT COUNT(*) FROM decision_log"
+        ).fetchone()[0]
+
+        reviewed = dl.conn.execute(
+            "SELECT COUNT(*) FROM decision_log WHERE status LIKE 'reviewed%'"
+        ).fetchone()[0]
+
+        # 方向正确 = 实际收益率与操作方向一致
+        # BUY/ADD: actual_return > 0 为正确
+        # SELL/REDUCE: actual_return < 0 为正确
+        direction_correct = dl.conn.execute(
+            """SELECT COUNT(*) FROM decision_log
+               WHERE status LIKE 'reviewed%'
+               AND (
+                   (action IN ('BUY', 'ADD') AND actual_return_pct > 0)
+                   OR (action IN ('SELL', 'REDUCE') AND actual_return_pct < 0)
+               )"""
+        ).fetchone()[0]
+
+        # 按操作类型统计平均收益
+        by_action = dl.conn.execute(
+            """SELECT action,
+                      COUNT(*) as cnt,
+                      AVG(actual_return_pct) as avg_ret,
+                      SUM(CASE
+                          WHEN (action IN ('BUY','ADD') AND actual_return_pct > 0)
+                            OR (action IN ('SELL','REDUCE') AND actual_return_pct < 0)
+                          THEN 1 ELSE 0
+                      END) as correct
+               FROM decision_log
+               WHERE status LIKE 'reviewed%'
+               GROUP BY action"""
+        ).fetchall()
+    except Exception:
+        total_decisions = 0
+        reviewed = 0
+        direction_correct = 0
+        by_action = []
+
+    has_content = True
+    lines.append("## 📈 累计决策胜率")
+    lines.append("")
+    lines.append(f"- **总决策数**: {total_decisions}")
+    lines.append(f"- **已复盘**: {reviewed}")
+    if reviewed > 0:
+        win_rate = direction_correct / reviewed * 100
+        lines.append(f"- **方向正确率**: {win_rate:.1f}% ({direction_correct}/{reviewed})")
+    else:
+        lines.append("- **方向正确率**: 暂无复盘数据")
+    lines.append("")
+
+    if by_action:
+        lines.append("| 操作 | 数量 | 方向正确率 | 平均收益 |")
+        lines.append("|------|------|------------|----------|")
+        for action, cnt, avg_ret, correct in by_action:
+            act_cn = _ACTION_CN.get(action, action)
+            acc = f"{correct/cnt*100:.0f}%" if cnt > 0 else "—"
+            ret = f"{avg_ret:+.1f}%" if avg_ret else "—"
+            lines.append(f"| {act_cn} | {cnt} | {acc} | {ret} |")
+        lines.append("")
+
+    # ---- 4. 最近教训 ----
+    try:
+        recent_lessons = dl.conn.execute(
+            """SELECT decision_date, company_name, ticker, action,
+                      lessons, review_notes
+               FROM decision_log
+               WHERE (lessons IS NOT NULL AND lessons != '')
+                  OR (review_notes IS NOT NULL AND review_notes != '')
+               ORDER BY updated_at DESC
+               LIMIT 5"""
+        ).fetchall()
+    except Exception:
+        recent_lessons = []
+
+    if recent_lessons:
+        has_content = True
+        lines.append("## 💡 最近教训")
+        lines.append("")
+        for row in recent_lessons:
+            ddate, name, ticker, action, lessons, notes = row
+            act_cn = _ACTION_CN.get(action, action)
+            lines.append(f"- **{ddate}** {name or ticker} ({act_cn})")
+            if lessons:
+                lines.append(f"  - 教训: {lessons}")
+            if notes:
+                lines.append(f"  - 复盘: {notes}")
+        lines.append("")
+
+    if not has_content:
+        lines.append("*暂无决策数据。*")
+        lines.append("")
+
+    # 关闭连接
+    try:
+        dl.conn.close()
+    except Exception:
+        pass
+
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Anomaly alerts renderer
 # ---------------------------------------------------------------------------
 
@@ -394,6 +650,7 @@ def generate_report_v2(
     db_path: str,
     kb_dir: Optional[str] = None,
     signal_db_path: Optional[str] = None,
+    decision_db_path: Optional[str] = None,
     output_dir: str = "reports",
 ) -> str:
     """Generate an enhanced weekly report integrating knowledge base and signal tracker.
@@ -402,6 +659,7 @@ def generate_report_v2(
         db_path: Path to the DuckDB database (score data).
         kb_dir: Path to knowledge base directory. Defaults to ~/.hermes/yidai/knowledge/
         signal_db_path: Path to signal tracker DuckDB. Defaults to ~/.hermes/yidai/db/signals.duckdb
+        decision_db_path: Path to decision log DuckDB. Defaults to ~/.hermes/yidai/db/decisions.duckdb
         output_dir: Directory to save the report.
 
     Returns:
@@ -412,6 +670,8 @@ def generate_report_v2(
         kb_dir = os.path.join(home, ".hermes", "yidai", "knowledge")
     if signal_db_path is None:
         signal_db_path = os.path.join(home, ".hermes", "yidai", "db", "signals.duckdb")
+    if decision_db_path is None:
+        decision_db_path = os.path.join(home, ".hermes", "yidai", "db", "decisions.duckdb")
 
     store = YidaiStore(db_path)
     today = date.today()
@@ -677,6 +937,10 @@ def generate_report_v2(
     # 5. KB Insights
     kb_text = _render_kb_insights(kb, signal_tracker)
     report_lines.append(kb_text)
+
+    # 5.3 Decision Review
+    decision_review_text = _render_decision_review(decision_db_path, today)
+    report_lines.append(decision_review_text)
 
     # 5.5 Leading indicators
     try:
