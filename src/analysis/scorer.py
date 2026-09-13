@@ -112,10 +112,13 @@ def _build_cashflow_data(financial_data: dict, prev_financial_data: dict | None)
 
     FCF is passed as None when data is unavailable (vs 0 when genuinely zero).
     """
-    ocf = financial_data.get("operating_cash_flow", 0) or 0
+    raw_ocf = financial_data.get("operating_cash_flow")
+    ocf = raw_ocf or 0
     net_income = financial_data.get("net_income", 0) or 0
     fcf = financial_data.get("free_cash_flow")  # None if not available
     capex = financial_data.get("capex")
+    if fcf is None and raw_ocf is not None and capex is not None:
+        fcf = raw_ocf - abs(capex)
 
     prev_ocf = None
     if prev_financial_data:
@@ -274,6 +277,23 @@ def _compute_dps_growth(dps_list: list[float]) -> list[float]:
     return rates
 
 
+def collect_buy_blocking_gaps(health_input: dict, cf_input: dict) -> list:
+    """Fields whose absence must not silently inflate a BUY.
+
+    Missing current_ratio / interest-bearing debt / FCF is common on HK
+    statements; health/cashflow then skip checks and score a neutral 3.
+    That is fine for a grade, not for a buy gate.
+    """
+    gaps: list = []
+    if health_input.get("current_ratio") is None:
+        gaps.append("current_ratio")
+    if health_input.get("interest_bearing_debt_ratio") is None:
+        gaps.append("interest_bearing_debt")
+    if cf_input.get("free_cash_flow") is None:
+        gaps.append("free_cash_flow")
+    return gaps
+
+
 # ---------------------------------------------------------------------------
 # Main scoring function
 # ---------------------------------------------------------------------------
@@ -367,6 +387,9 @@ def score_all(
     if strategy_score is None:
         strategy_score = 0
 
+    missing_fields = collect_buy_blocking_gaps(health_input, cf_input)
+    data_complete = len(missing_fields) == 0
+
     # Apply regime adjustments to PE percentile cap
     effective_pe_cap = 0.80  # default
     effective_buy_delta = 0  # default
@@ -390,6 +413,8 @@ def score_all(
         ownership_score=ownership_score,
         strategy_score=strategy_score,
         qualitative_confirmed=qualitative_confirmed,
+        data_complete=data_complete,
+        missing_fields=missing_fields,
         pe_percentile=pe_percentile,
         prev_signal=prev_signal,
         prev_signal_date=prev_signal_date,
@@ -433,6 +458,10 @@ def score_all(
     insider_warnings = valuation.check_insider_activity_warning(insider_result)
     all_details.append("--- Insider Activity (advisory) ---")
     all_details.extend(insider_warnings)
+    if missing_fields:
+        all_details.append("--- Data completeness (BUY gate) ---")
+        all_details.append("missing: " + ", ".join(missing_fields))
+        all_details.append("BUY blocked until these fields are filled (missing ≠ score 3)")
 
     return {
         "ticker": sr.ticker,
@@ -448,6 +477,8 @@ def score_all(
         "total_score": sr.total_score,
         "grade": sr.grade,
         "signal": sr.signal,
+        "data_complete": sr.data_complete,
+        "missing_fields": missing_fields,
         "details": all_details,
         "insider_activity": insider_result,
         "ownership_structure": ownership_analysis,

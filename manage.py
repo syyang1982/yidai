@@ -15,10 +15,14 @@
     python manage.py kb 01810.HK            查看公司档案
     python manage.py list                   列出所有公司评分
     python manage.py decision list           列出所有决策
-    python manage.py decision add 01810.HK   记录投资决策
+    python manage.py decision add 01810.HK   记录投资决策（先类比检索，再写入持仓）
     python manage.py decision show <id>      查看决策详情
     python manage.py decision review         查看待复盘决策
     python manage.py decision stats          决策统计汇总
+    python manage.py position list           列出 open 持仓（学习单位）
+    python manage.py position show 01810.HK  查看持仓论点/失效条件/批次
+    python manage.py position set 01810.HK   补全 thesis/invalidation
+    python manage.py position rebuild        从 decision_log 重建持仓
     python manage.py test                   运行测试
     python manage.py events                 显示未来7天事件
     python manage.py events --days 30       显示未来30天事件
@@ -254,7 +258,7 @@ def _analyze_one(fetcher, kb, ticker, display, name, market, sector, thesis):
     except Exception as e:
         print(f"  ⚠️ 股东数据获取失败: {e}")
 
-    # 读取KB中已有的定性评分（人工设置），不存在则默认3
+    # 读取KB中已有的定性评分（人工设置）。未设置不得默认 3，否则会抬高 BUY。
     existing_scores = {}
     try:
         existing_profile = kb.get_company_profile(display)
@@ -273,16 +277,21 @@ def _analyze_one(fetcher, kb, ticker, display, name, market, sector, thesis):
                 pass
         return default
 
+    own_q = _get_qual("股东", None)
+    strat_q = _get_qual("战略", None)
     scores = {
         "profitability": prof["score"], "health": h["score"],
         "cashflow": cf["score"], "valuation": v["score"],
         "growth": g["score"], "dividend": d_score["score"],
-        "ownership": _get_qual("股东", 3),
-        "strategy": _get_qual("战略", 3),
+        "ownership": own_q or 0,
+        "strategy": strat_q or 0,
     }
     total = sum(scores.values())
     grade = _compute_grade(total)
-    sig = _compute_signal(total, *scores.values())
+    sig = _compute_signal(
+        total, *scores.values(),
+        qualitative_confirmed=bool(own_q and strat_q),
+    )
 
     # Print
     dim_cn = {"profitability": "盈利能力", "health": "财务健康", "cashflow": "现金流",
@@ -632,10 +641,13 @@ def cmd_score(args):
 def cmd_decision(args):
     """决策日志：记录、查看、复盘投资决策。"""
     from src.strategy.decision import DecisionLog, DecisionRecord
+    from src.strategy.position import PositionBook, default_decision_db
+    from src.strategy.analog import find_analogs
     from src.knowledge.base import KnowledgeBase
 
-    DECISION_DB = os.path.join(PROJECT_ROOT, "db", "signals.duckdb")
+    DECISION_DB = default_decision_db()
     log = DecisionLog(DECISION_DB)
+    book = PositionBook(db_path=DECISION_DB, conn=log.conn)
 
     # Resolve the second positional arg: ticker for add, decision_id for show/outcome
     action = args.decision_action
@@ -646,6 +658,8 @@ def cmd_decision(args):
         print("    python manage.py decision add 01810.HK \\")
         print("        --action BUY --price 30.5 --shares 1000 \\")
         print("        --reason \"评分A级\" --thesis \"长期看好\" \\")
+        print("        --confidence 4 --counter-argument \"现金流承压\" \\")
+        print("        --invalidation \"汽车交付连续两季下滑\" --book compound \\")
         print("        --expect-6m 35 --expect-12m 40")
         print("    python manage.py decision show <id>               查看决策详情")
         print("    python manage.py decision review                  查看待复盘")
@@ -815,11 +829,27 @@ def cmd_decision(args):
             grade=grade,
             signal=signal,
             portfolio_pct=args.pct or 0,
+            expected_price_1w=getattr(args, "expect_1w", None) or 0,
+            expected_price_1m=getattr(args, "expect_1m", None) or 0,
             expected_price_6m=args.expect_6m or 0,
             expected_price_12m=args.expect_12m or 0,
             expected_reasoning=args.expect_reason or "",
+            market_regime=getattr(args, "regime", None) or "",
             decision_date=args.date or date.today().isoformat(),
         )
+        import uuid as _uuid
+        rec.decision_id = str(_uuid.uuid4())[:8]
+
+        if rec.reason:
+            try:
+                from src.strategy.reason_taxonomy import classify_reason
+                cat, sell = classify_reason(rec.reason, rec.action)
+                if cat:
+                    rec.reason_category = cat.value
+                if sell:
+                    rec.sell_reason = sell.value
+            except Exception:
+                pass
 
         # ── 必填：信心程度 + 反面论据 ──
         if hasattr(args, 'confidence') and args.confidence:
@@ -845,16 +875,74 @@ def cmd_decision(args):
             except (EOFError, KeyboardInterrupt):
                 print("\n  跳过")
 
-        did = log.record(rec)
+        invalidation = getattr(args, "invalidation", None) or ""
+        if rec.action in ("BUY", "ADD") and not invalidation:
+            existing = book.get_open(ticker)
+            if existing is None or existing.needs_invalidation():
+                try:
+                    invalidation = input(
+                        "  🛑 失效条件 (什么情况无条件卖出，与盈亏无关): "
+                    ).strip()
+                except (EOFError, KeyboardInterrupt):
+                    print("\n  跳过")
+                    invalidation = ""
+
+        # 类比检索：先看同类历史，再允许写入
+        try:
+            kb_analog = KnowledgeBase()
+        except Exception:
+            kb_analog = None
+        analog = find_analogs(log, rec, knowledge_base=kb_analog)
+        print()
+        print(analog.format_text())
+        print()
+
+        pos_result = book.apply_fill(
+            rec,
+            book=getattr(args, "book", None) or "",
+            invalidation=invalidation,
+            horizon=getattr(args, "horizon", None) or "",
+            max_size_pct=getattr(args, "max_size", None) or 0,
+            require_invalidation=rec.action in ("BUY", "ADD"),
+        )
+        for w in pos_result.get("warnings") or []:
+            print(f"  ⚠️  {w}")
+        if not pos_result["accepted"]:
+            for v in pos_result["violations"]:
+                print(f"  ❌ {v}")
+            return
+
+        result = log.record(rec, enforce_process=True)
+        if not result["accepted"]:
+            for v in result["violations"]:
+                print(f"  ❌ {v}")
+            for w in result["warnings"]:
+                print(f"  ⚠️  {w}")
+            return
+        did = result["decision_id"]
+        # backfill lot decision_id if apply_fill ran before id existed
+        if rec.position_id:
+            pos = book.get(rec.position_id)
+            if pos:
+                for lot in pos.lots:
+                    if not lot.decision_id:
+                        lot.decision_id = did
+                book.save(pos)
+
         print(f"\n  ✅ 决策已记录: {did}")
         print(f"  {company_name} ({ticker}) {rec.action} {rec.shares}股 @ {rec.price} {rec.currency}")
+        if rec.position_id:
+            print(f"  持仓: {rec.position_id}")
         if total_score > 0:
-            print(f"  评分: {total_score}/35 ({grade}, {signal})")
+            print(f"  评分: {total_score}/40 ({grade}, {signal})")
         if rec.confidence_level:
             print(f"  信心: {rec.confidence_level}/5")
         if rec.counter_argument:
             print(f"  反面论据: {rec.counter_argument}")
+        if invalidation:
+            print(f"  失效条件: {invalidation}")
         print(f"\n  查看: python manage.py decision show {did}")
+        print(f"  持仓: python manage.py position show {ticker}")
         return
 
     # ── outcome ──
@@ -897,6 +985,95 @@ def cmd_decision(args):
     # fallback
     print(f"  未知操作: {action}")
     print("  可用: add, list, show, review, outcome, stats")
+
+
+def cmd_position(args):
+    """持仓实体：list / show / set / rebuild。学习单位是持仓不是单笔成交。"""
+    from src.strategy.decision import DecisionLog
+    from src.strategy.position import PositionBook, default_decision_db
+
+    DECISION_DB = default_decision_db()
+    log = DecisionLog(DECISION_DB)
+    book = PositionBook(db_path=DECISION_DB, conn=log.conn)
+    action = getattr(args, "position_action", None)
+    ticker = getattr(args, "ticker_or_id", None) or getattr(args, "ticker", None)
+
+    if not action:
+        print("  用法:")
+        print("    python manage.py position list")
+        print("    python manage.py position show 01810.HK")
+        print("    python manage.py position set 01810.HK --thesis \"...\" --invalidation \"...\" --book compound --horizon 12m")
+        print("    python manage.py position rebuild")
+        return
+
+    if action == "list":
+        status = getattr(args, "status", None) or "open"
+        rows = book.list_all(status=None if status == "all" else status)
+        if not rows:
+            print("  暂无持仓。先: python manage.py position rebuild")
+            return
+        print(f"\n  {'代码':<12} {'账本':<10} {'状态':<8} {'股数':>8} {'均价':>8} {'期限':<6} {'失效':<8} {'id'}")
+        print(f"  {'-'*78}")
+        for p in rows:
+            inv = "待补全" if p.needs_invalidation() else "已填"
+            print(
+                f"  {p.ticker:<12} {p.book:<10} {p.status:<8} "
+                f"{p.shares:>8,} {p.avg_cost:>8.2f} {p.horizon:<6} {inv:<8} {p.position_id}"
+            )
+        print(f"\n  共 {len(rows)} 条。show: python manage.py position show <ticker>")
+        return
+
+    if action == "show":
+        if not ticker:
+            print("  用法: python manage.py position show <ticker>")
+            return
+        pos = book.get_open(ticker) or (book.list_all(ticker=ticker) or [None])[0]
+        if not pos:
+            print(f"  ❌ 未找到持仓: {ticker}")
+            return
+        print()
+        print(book.to_markdown(pos))
+        fills = log.list_decisions(ticker=ticker, limit=20)
+        if fills:
+            print("\n- **关联决策:**")
+            for r in fills:
+                mark = "*" if r.position_id == pos.position_id else " "
+                print(
+                    f"  {mark} {r.decision_date} {r.action} {r.shares:,} @ {r.price} "
+                    f"[{r.decision_id}] {r.reason_category or r.reason or ''}"
+                )
+        return
+
+    if action == "set":
+        if not ticker:
+            print("  用法: python manage.py position set <ticker> --invalidation \"...\"")
+            return
+        pos = book.update_meta(
+            ticker,
+            thesis=getattr(args, "thesis", None),
+            invalidation=getattr(args, "invalidation", None),
+            book=getattr(args, "book", None),
+            horizon=getattr(args, "horizon", None),
+            max_size_pct=getattr(args, "max_size", None),
+        )
+        if pos is None:
+            print(f"  ❌ 无 open position: {ticker}。先 decision add 或 position rebuild")
+            return
+        print(book.to_markdown(pos))
+        return
+
+    if action == "rebuild":
+        stats = book.rebuild_from_decisions(log)
+        print(
+            f"  ✅ 已从 decision_log 重建持仓: "
+            f"{stats['decisions']} 笔决策 → {stats['all']} 条持仓 "
+            f"(open {stats['open']})"
+        )
+        print("  历史持仓失效条件为「待补全」，用 position set 补全。")
+        return
+
+    print(f"  未知操作: {action}")
+    print("  可用: list, show, set, rebuild")
 
 
 def cmd_signal(args):
@@ -1588,6 +1765,13 @@ def main():
     p_decision.add_argument("--expect-reason", help="预期逻辑")
     p_decision.add_argument("--confidence", type=int, choices=[1,2,3,4,5], help="信心程度 (1-5)")
     p_decision.add_argument("--counter-argument", dest="counter_argument", help="反面论据")
+    p_decision.add_argument("--invalidation", help="持仓失效条件（与盈亏无关）")
+    p_decision.add_argument("--book", choices=["compound", "tactical"], help="账本: compound/tactical")
+    p_decision.add_argument("--horizon", choices=["1w", "1m", "6m", "12m"], help="持仓期限")
+    p_decision.add_argument("--max-size", type=float, dest="max_size", help="单股仓位上限 %%")
+    p_decision.add_argument("--expect-1w", type=float, dest="expect_1w", help="1周预期价格")
+    p_decision.add_argument("--expect-1m", type=float, dest="expect_1m", help="1月预期价格")
+    p_decision.add_argument("--regime", help="市场环境 bull/bear/sideways/volatile")
     p_decision.add_argument("--date", help="决策日期 (YYYY-MM-DD)")
     p_decision.add_argument("--decision-id", dest="decision_id", help="决策ID (show/outcome)")
     p_decision.add_argument("--actual-price", type=float, dest="actual_price", help="实际价格")
@@ -1595,6 +1779,21 @@ def main():
     p_decision.add_argument("--notes", help="复盘笔记")
     p_decision.add_argument("--lessons", help="经验教训")
     p_decision.add_argument("--limit", type=int, help="列表数量限制")
+
+    # position
+    p_position = subparsers.add_parser("position", help="持仓实体：论点/失效条件/批次")
+    p_position.add_argument("position_action", nargs="?", default=None,
+                            choices=["list", "show", "set", "rebuild"],
+                            help="操作: list/show/set/rebuild")
+    p_position.add_argument("ticker_or_id", nargs="?", help="股票代码")
+    p_position.add_argument("--ticker", help="股票代码")
+    p_position.add_argument("--thesis", help="投资论点")
+    p_position.add_argument("--invalidation", help="失效条件")
+    p_position.add_argument("--book", choices=["compound", "tactical"], help="账本")
+    p_position.add_argument("--horizon", choices=["1w", "1m", "6m", "12m"], help="期限")
+    p_position.add_argument("--max-size", type=float, dest="max_size", help="仓位上限 %%")
+    p_position.add_argument("--status", choices=["open", "closed", "all"], default="open",
+                            help="list 过滤（默认 open）")
 
     # events
     p_events = subparsers.add_parser("events", help="事件管理：显示/扫描/刷新")
@@ -1676,6 +1875,7 @@ def main():
         "signal": cmd_signal,
         "score": cmd_score,
         "decision": cmd_decision,
+        "position": cmd_position,
         "test": cmd_test,
         "anomaly": cmd_anomaly,
         "dividend": cmd_dividend,

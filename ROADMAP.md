@@ -188,6 +188,30 @@
 
 ---
 
+## 模块十：持仓实体 + 决策时闭环 ✅ 已完成 (2026-09-13)
+
+> **目标：** 学习单位从「单笔成交」升级为「持仓论点」；写入前检索同类历史；缺失数据不得发出 BUY。
+
+| # | 工作项 | 描述 | 状态 |
+|---|--------|------|------|
+| W10.1 | Position 实体 | `src/strategy/position.py` — thesis/invalidation/book/FIFO 批次 | ✅ |
+| W10.2 | 决策挂载持仓 | `DecisionRecord.position_id`；`manage.py position` | ✅ |
+| W10.3 | 类比检索 | `src/strategy/analog.py` — 同玩法/同标的/信心校准，写入前打印 | ✅ |
+| W10.4 | 过程硬约束 | 实盘 BUY/ADD 必须 confidence + counter_argument + invalidation | ✅ |
+| W10.5 | 缺失数据阻断 BUY | `data_complete=False` → HOLD；current_ratio / IBD / FCF | ✅ |
+| W10.6 | 决策库归一 | 规范库 `db/decisions.duckdb`（不再写入 signals.duckdb 的 decision_log） | ✅ |
+| W10.7 | Hermes 交接 | `docs/hermes-decision-loop.md` + yidai-operations skill | ✅ |
+
+**CLI:**
+```
+python manage.py position list|show|set|rebuild
+python manage.py decision add TICKER --confidence 4 --counter-argument "..." --invalidation "..." --book compound
+```
+
+**原则:** 评分系统是风险过滤器（REDUCE 可靠，BUY 不可靠）。BUY 只表示「有资格研究」，不是下单指令。
+
+---
+
 ## 待做事项
 
 | # | 工作项 | 描述 | 状态 |
@@ -215,3 +239,4 @@
 || 2026-09-09 | ✅ W2.3.1 阈值校准模块 (157条信号分析, 发现市场环境自适应需求) ||
 || 2026-09-13 | ✅ W2.1.4 历史决策补录 (41条交易→decisions.duckdb, 37条含七维评分) ||
 || 2026-09-13 | ✅ 模块九：决策反馈闭环 (P1理由分类学+P2快检+P3周报集成+P4认知偏差) ||
+|| 2026-09-13 | ✅ 模块十：持仓实体+类比检索+缺失数据阻断BUY；规范库 decisions.duckdb ||

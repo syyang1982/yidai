@@ -287,3 +287,25 @@ class TestScoreResultAutoComputation:
         assert sr.total_score == 14
         assert sr.grade == "D"
         assert sr.signal == "REDUCE"
+
+    def test_missing_data_blocks_buy(self):
+        """Complete scores would BUY; missing health/cashflow inputs force HOLD."""
+        kwargs = dict(
+            ticker="TEST",
+            date=date(2024, 1, 1),
+            profitability_score=5,
+            health_score=5,
+            cashflow_score=5,
+            valuation_score=5,
+            growth_score=5,
+            ownership_score=5,
+            strategy_score=5,
+        )
+        assert ScoreResult(**kwargs).signal == "BUY"
+        blocked = ScoreResult(
+            **kwargs,
+            data_complete=False,
+            missing_fields=["current_ratio", "free_cash_flow"],
+        )
+        assert blocked.signal == "HOLD"
+        assert blocked.grade == "A"

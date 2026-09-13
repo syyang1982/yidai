@@ -185,6 +185,7 @@ def _compute_signal(
     eval_date: Optional[str] = None,
     pe_cap: float = 0.80,
     buy_score_delta: int = 0,
+    data_complete: bool = True,
 ) -> str:
     """Determine BUY / HOLD / WATCH / REDUCE signal.
 
@@ -193,12 +194,13 @@ def _compute_signal(
          health < 2  OR  cashflow < 2  OR  ownership < 1
       2. Very low total -> REDUCE (total <= 16)
       3. Any quant dim < 2 -> REDUCE (excludes ownership/strategy)
-      4. Strong + cheap + confirmed -> BUY (with valuation guard)
+      4. Strong + cheap + confirmed + complete data -> BUY (with valuation guard)
       5. Adequate -> HOLD (total >= 17)
       6. Otherwise -> WATCH
 
     weighted_total: if provided, uses dimension-weighted score for BUY threshold.
     qualitative_confirmed: if False, blocks BUY (D7/D8 not manually scored).
+    data_complete: if False, blocks BUY (health/cashflow inputs missing).
     pe_percentile: if provided, blocks BUY when PE > pe_cap percentile.
     pe_cap: PE percentile cap for BUY (default 0.80, adjusted by regime).
     buy_score_delta: regime-based adjustment to BUY threshold (default 0).
@@ -230,7 +232,7 @@ def _compute_signal(
     # Apply regime-based BUY threshold adjustment
     effective_buy_threshold = 33 + buy_score_delta
     if (check_total >= effective_buy_threshold and valuation >= 4 and health >= 3 and growth >= 3
-            and qualitative_confirmed):
+            and qualitative_confirmed and data_complete):
 
         # --- Improvement 1: Valuation guard ---
         # Block BUY if PE is at expensive valuations
@@ -267,7 +269,7 @@ def _compute_signal(
                 # Require strong fundamentals but relaxed total score
                 if (check_total >= effective_buy_threshold - 2
                         and valuation >= 3 and health >= 3 and growth >= 3
-                        and qualitative_confirmed):
+                        and qualitative_confirmed and data_complete):
                     # Still apply PE guard
                     if pe_percentile is not None and pe_percentile > pe_cap:
                         return "HOLD"
@@ -316,6 +318,9 @@ class ScoreResult:
 
     # --- qualitative confirmation flag ---
     qualitative_confirmed: bool = True
+    # --- missing health/cashflow inputs must not silently score as 3 and fire BUY ---
+    data_complete: bool = True
+    missing_fields: list = field(default_factory=list)
 
     # --- improvement fields (optional) ---
     pe_percentile: Optional[float] = None
@@ -361,4 +366,5 @@ class ScoreResult:
             eval_date=self.eval_date,
             pe_cap=self.pe_cap,
             buy_score_delta=self.buy_score_delta,
+            data_complete=self.data_complete,
         )

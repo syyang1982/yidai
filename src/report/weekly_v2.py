@@ -369,6 +369,41 @@ def _render_decision_review(
         return "\n".join(lines)
 
     has_content = False
+
+    # ---- 0. Open positions (the unit of learning) ----
+    try:
+        from src.strategy.position import PositionBook
+        pos_book = PositionBook(db_path=decision_db_path, conn=dl.conn)
+        open_positions = pos_book.list_open()
+    except Exception:
+        open_positions = []
+
+    if open_positions:
+        has_content = True
+        lines.append("## 📦 持仓（论点单位）")
+        lines.append("")
+        lines.append("| 标的 | 账本 | 股数 | 均价 | 期限 | 失效条件 |")
+        lines.append("|------|------|------|------|------|----------|")
+        for p in open_positions:
+            inv = (p.invalidation or "待补全").replace("|", "/")
+            if len(inv) > 24:
+                inv = inv[:24] + "…"
+            name = p.company_name or p.ticker
+            lines.append(
+                f"| {name} ({p.ticker}) "
+                f"| {p.book} "
+                f"| {p.shares:,} "
+                f"| {p.avg_cost:.2f} "
+                f"| {p.horizon} "
+                f"| {inv} |"
+            )
+        lines.append("")
+        pending_inv = [p for p in open_positions if p.needs_invalidation()]
+        if pending_inv:
+            tickers = ", ".join(p.ticker for p in pending_inv)
+            lines.append(f"- ⚠️ 失效条件待补全: {tickers}")
+            lines.append("")
+
     week_ago = (today - timedelta(days=7)).isoformat()
     month_later = today + timedelta(days=30)
     week_later = today + timedelta(days=7)

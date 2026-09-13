@@ -55,6 +55,7 @@ class DecisionRecord:
 
     # 关联
     signal_id: str = ""           # 关联的 signal_records.signal_id（可空）
+    position_id: str = ""         # 关联的 positions.position_id（可空）
     portfolio_pct: float = 0.0    # 该笔交易后，此标的占总持仓的百分比
 
     # 预期
@@ -139,7 +140,8 @@ class DecisionLog:
                 decision_date DATE,
                 status VARCHAR,
                 created_at TIMESTAMP,
-                updated_at TIMESTAMP
+                updated_at TIMESTAMP,
+                position_id VARCHAR
             )
         """)
         # 为已有数据库添加缺失列（如果已存在旧表则 ALTER）
@@ -156,6 +158,7 @@ class DecisionLog:
                 ("actual_price_1w", "DOUBLE"), ("actual_price_1m", "DOUBLE"),
                 ("confidence_level", "INTEGER"), ("counter_argument", "VARCHAR"),
                 ("regret_flag", "BOOLEAN"), ("market_regime", "VARCHAR"),
+                ("position_id", "VARCHAR"),
             ]:
                 if col not in existing_cols:
                     try:
@@ -195,24 +198,30 @@ class DecisionLog:
         return warnings, violations
 
     def record(
-        self, rec: DecisionRecord, enforce_constraints: bool = True
+        self,
+        rec: DecisionRecord,
+        enforce_constraints: bool = True,
+        enforce_process: bool = False,
     ) -> dict:
         """记录一条决策。返回 {decision_id, warnings, violations, accepted}。
 
         Args:
             rec: DecisionRecord
-            enforce_constraints: if True, reject if hard constraints violated
-
-        Returns:
-            dict with:
-                - decision_id: str (empty if rejected)
-                - warnings: list of str (soft violations, still recorded)
-                - violations: list of str (hard violations, rejected if enforce)
-                - accepted: bool
+            enforce_constraints: if True, reject if hard portfolio constraints violated
+            enforce_process: if True, BUY/ADD require counter_argument + confidence
+                (live CLI only — backfill/tests leave this False)
         """
         warnings, violations = self._check_constraints(rec)
 
-        if enforce_constraints and violations:
+        if enforce_process and rec.action in ("BUY", "ADD"):
+            if not (rec.counter_argument or "").strip():
+                violations.append(
+                    "BUY/ADD 必须在决策时填写反面论据 --counter-argument（事后补填无效）"
+                )
+            if rec.confidence_level not in (1, 2, 3, 4, 5):
+                violations.append("BUY/ADD 必须填写信心程度 --confidence 1-5")
+
+        if (enforce_constraints or enforce_process) and violations:
             return {
                 "decision_id": "",
                 "warnings": warnings,
@@ -231,12 +240,35 @@ class DecisionLog:
         if rec.shares and rec.price and not rec.amount:
             rec.amount = rec.shares * rec.price
 
+        if not rec.reason_category and rec.reason:
+            try:
+                from src.strategy.reason_taxonomy import classify_reason
+                cat, sell = classify_reason(rec.reason, rec.action or "BUY")
+                if cat and not rec.reason_category:
+                    rec.reason_category = cat.value
+                if sell and not rec.sell_reason:
+                    rec.sell_reason = sell.value
+            except Exception:
+                pass
+
         self.conn.execute(
             """
-            INSERT OR REPLACE INTO decision_log VALUES (
+            INSERT OR REPLACE INTO decision_log (
+                decision_id, ticker, company_name, market, action, shares,
+                price, amount, currency, reason, reason_category, sell_reason,
+                thesis, catalyst, risk_note, dimension_scores, total_score,
+                grade, signal, signal_id, portfolio_pct,
+                expected_price_1w, expected_price_1m,
+                expected_price_6m, expected_price_12m, expected_reasoning,
+                actual_price_1w, actual_price_1m,
+                actual_price_6m, actual_price_12m, actual_return_pct,
+                review_notes, lessons, confidence_level, counter_argument,
+                regret_flag, market_regime, decision_date, status,
+                created_at, updated_at, position_id
+            ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             [
@@ -255,7 +287,7 @@ class DecisionLog:
                 rec.confidence_level, rec.counter_argument,
                 rec.regret_flag, rec.market_regime,
                 rec.decision_date, rec.status,
-                rec.created_at, rec.updated_at,
+                rec.created_at, rec.updated_at, rec.position_id,
             ],
         )
         return {
@@ -435,6 +467,8 @@ class DecisionLog:
             f"- **金额:** {rec.amount:,.0f} {rec.currency}",
             f"- **理由:** {rec.reason}",
         ]
+        if rec.position_id:
+            lines.append(f"- **持仓:** {rec.position_id}")
         if rec.reason_category:
             lines.append(f"- **催化剂分类:** {rec.reason_category}")
         if rec.sell_reason:
