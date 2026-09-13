@@ -1004,6 +1004,7 @@ def cmd_position(args):
         print("    python manage.py position show 01810.HK")
         print("    python manage.py position set 01810.HK --thesis \"...\" --invalidation \"...\" --book compound --horizon 12m")
         print("    python manage.py position rebuild")
+        print("    python manage.py position watch                 失效观测红黄绿")
         return
 
     if action == "list":
@@ -1060,6 +1061,16 @@ def cmd_position(args):
             print(f"  ❌ 无 open position: {ticker}。先 decision add 或 position rebuild")
             return
         print(book.to_markdown(pos))
+        return
+
+    if action == "watch":
+        from src.analysis.leading_indicators import LeadingIndicatorStore
+        from src.strategy.invalidation_watch import format_watch, sync
+        store = LeadingIndicatorStore()
+        stats = sync(store)
+        print(f"  观测表已对齐: 注册 {stats['registered']}  种子 {stats['seeded']}  从短码复制 {stats['copied']}")
+        print()
+        print(format_watch(store, book.list_open()))
         return
 
     if action == "rebuild":
@@ -1530,8 +1541,7 @@ def cmd_indicators(args):
     """领先指标管理。"""
     from src.analysis.leading_indicators import LeadingIndicatorStore
 
-    db_path = os.path.join(PROJECT_ROOT, "db", "yidai.duckdb")
-    store = LeadingIndicatorStore(db_path)
+    store = LeadingIndicatorStore()  # db/leading_indicators.duckdb
 
     ticker = getattr(args, 'ticker', None)
     if ticker:
@@ -1783,8 +1793,8 @@ def main():
     # position
     p_position = subparsers.add_parser("position", help="持仓实体：论点/失效条件/批次")
     p_position.add_argument("position_action", nargs="?", default=None,
-                            choices=["list", "show", "set", "rebuild"],
-                            help="操作: list/show/set/rebuild")
+                            choices=["list", "show", "set", "rebuild", "watch"],
+                            help="操作: list/show/set/rebuild/watch")
     p_position.add_argument("ticker_or_id", nargs="?", help="股票代码")
     p_position.add_argument("--ticker", help="股票代码")
     p_position.add_argument("--thesis", help="投资论点")
