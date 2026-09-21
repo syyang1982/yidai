@@ -342,6 +342,28 @@ def scan_sell_alerts(
         if price <= 0:
             continue
 
+        # 成本币种≠价格币种时先换算（如名创成本CNY、港股价格HKD，直接比会少算亏损）
+        price_ccy = (price_info.get("currency") if isinstance(price_info, dict) else None) \
+            or holding.get("price_ccy") or holding.get("cost_ccy") or "HKD"
+        cost_ccy = holding.get("cost_ccy", price_ccy)
+        if cost_ccy != price_ccy:
+            rates = portfolio.get("exchange_rates", {})
+
+            def _to_hkd(amount, ccy):
+                if ccy == "HKD":
+                    return amount
+                if ccy == "CNY" and rates.get("CNY_PER_HKD"):
+                    return amount / rates["CNY_PER_HKD"]
+                if ccy == "USD" and rates.get("USD_PER_HKD"):
+                    return amount / rates["USD_PER_HKD"]
+                return None
+
+            cost_hkd = _to_hkd(cost, cost_ccy)
+            price_hkd = _to_hkd(price, price_ccy)
+            if cost_hkd and price_hkd:
+                # 换算成本到价格币种，保证 (price-cost)/cost 即为真实盈亏
+                cost = cost_hkd * price / price_hkd
+
         pnl = (price - cost) / cost
 
         # 获取信号信息
