@@ -132,7 +132,9 @@ def _analyze_one(fetcher, kb, ticker, display, name, market, sector, thesis):
     from src.analysis.insider_activity import check_insider_activity, format_insider_warnings
     from src.analysis.ownership_structure import analyze_controller_status, format_ownership_structure
     from src.analysis.master_integration import integrated_assessment, format_integrated_assessment
-    from src.data.models import _compute_grade, _compute_signal
+    from src.data.models import (
+        _compute_grade, _compute_signal, normalize_total, DIMENSIONS_EXCEPT_DIVIDEND,
+    )
     from src.data.store import YidaiStore
 
     DB_PATH = os.path.join(PROJECT_ROOT, "db", "yidai.duckdb")
@@ -238,7 +240,8 @@ def _analyze_one(fetcher, kb, ticker, display, name, market, sector, thesis):
         )
         d_score = dividend_quality.score(d_score)
     except Exception:
-        d_score = {"score": 0}
+        # 无数据 = 未实评，D6 不计入归一化分母（不要当成 0 分去扣）
+        d_score = {"score": 0, "has_data": False}
 
     # Insider activity check (Check 6 — advisory only, does NOT affect score)
     insider_events = []
@@ -287,9 +290,17 @@ def _analyze_one(fetcher, kb, ticker, display, name, market, sector, thesis):
         "strategy": strat_q or 0,
     }
     total = sum(scores.values())
-    grade = _compute_grade(total)
+    # W7.10 实评维度归一化：D6 无分红数据时不算实评、不计入分母，
+    # 免得不发股息的成长股被满分卡死（与 scorer.py 同口径）。
+    scored_dims = (
+        None if d_score.get("has_data", True) else DIMENSIONS_EXCEPT_DIVIDEND
+    )
+    scored_n = len(scores) if scored_dims is None else len(scored_dims)
+    raw_max = 5 * scored_n
+    norm_total = normalize_total(total, scored_dims)
+    grade = _compute_grade(norm_total)
     sig = _compute_signal(
-        total, *scores.values(),
+        norm_total, *scores.values(),
         qualitative_confirmed=bool(own_q and strat_q),
     )
 
@@ -320,7 +331,13 @@ def _analyze_one(fetcher, kb, ticker, display, name, market, sector, thesis):
         print(f"  {cn:　<6} [{bar}] {s}/5")
 
     emoji = {"BUY": "🟢", "HOLD": "🟡", "WATCH": "🔵", "REDUCE": "🔴"}.get(sig, "❓")
-    print(f"\n  总分: {total}/35  等级: {grade}  信号: {emoji} {sig}")
+    if scored_n < len(scores):
+        print(
+            f"\n  总分: {total}/{raw_max}（实评 {scored_n}/8 维 → 归一 {norm_total:.1f}/40）"
+            f"  等级: {grade}  信号: {emoji} {sig}"
+        )
+    else:
+        print(f"\n  总分: {total}/40  等级: {grade}  信号: {emoji} {sig}")
 
     gross_margin = (latest.get("gross_profit", 0) or 0) / denom
     net_margin = (ni or 0) / denom
@@ -746,7 +763,10 @@ def cmd_decision(args):
         signal = ""
         try:
             from src.data.fetcher import EastmoneyFetcher
-            from src.data.models import _compute_grade, _compute_signal
+            from src.data.models import (
+                _compute_grade, _compute_signal,
+                normalize_total, DIMENSIONS_EXCEPT_DIVIDEND,
+            )
             from src.analysis import profitability, health, cashflow, valuation, growth
 
             fetcher = EastmoneyFetcher()
@@ -800,15 +820,27 @@ def cmd_decision(args):
                 except Exception:
                     pass
 
+                # prof/h/cf/v/g 是 dict，必须取 ["score"] 再求和；
+                # 这里只评 7 个维度（没有 dividend），归一到 8 维 40 分制再分档/发信号。
                 scores = {
-                    "盈利": prof, "健康": h, "现金流": cf,
-                    "估值": v, "成长": g, "股东": ownership_score or 0, "战略": strategy_score or 0,
+                    "盈利": prof["score"], "健康": h["score"], "现金流": cf["score"],
+                    "估值": v["score"], "成长": g["score"],
+                    "股东": ownership_score or 0, "战略": strategy_score or 0,
                 }
                 total_score = sum(scores.values())
-                grade = _compute_grade(total_score)
-                signal = _compute_signal(total_score, prof, h, cf, v, g, ownership_score or 0, strategy_score or 0)
+                norm_score = normalize_total(total_score, DIMENSIONS_EXCEPT_DIVIDEND)
+                grade = _compute_grade(norm_score)
+                signal = _compute_signal(
+                    norm_score,
+                    prof["score"], h["score"], cf["score"], v["score"], g["score"],
+                    0, ownership_score or 0, strategy_score or 0,
+                )
                 qual_flag = "✓" if ownership_score is not None and strategy_score is not None else "?"
-                print(f"  📊 自动获取评分: {total_score}/40 ({grade}, {signal}) 定性{qual_flag}")
+                print(
+                    f"  📊 自动获取评分: {total_score}/35"
+                    f"（实评 7/8 维 → 归一 {norm_score:.1f}/40）"
+                    f" ({grade}, {signal}) 定性{qual_flag}"
+                )
         except Exception as e:
             print(f"  ⚠️ 无法自动获取评分: {e}")
 
@@ -1594,13 +1626,189 @@ def cmd_indicators(args):
 
 
 def cmd_constraints(args):
-    """组合约束检查。"""
-    from src.strategy.portfolio_config import get_default_constraints, create_sample_holdings
+    """组合约束检查 — 默认读真实持仓 (~/.hermes/portfolio_data.json)。
+
+    历史坑: 此前用 create_sample_holdings() 的演示数据当真实持仓，
+    导致单股仓位检查永远报"均在限内"（小米实际占 61.1% 却显示合规）。
+    """
+    from src.strategy.portfolio_config import (
+        get_default_constraints, load_real_holdings, create_sample_holdings,
+    )
+
+    use_sample = bool(getattr(args, "sample", False))
+    holdings, warnings = ([], [])
+    source = ""
+    if use_sample:
+        holdings = create_sample_holdings()
+        source = "⚠️ 示例数据 (--sample)，结论不反映真实组合"
+    else:
+        holdings, warnings = load_real_holdings()
+        source = f"真实持仓 (~/.hermes/portfolio_data.json)  {len(holdings)} 个非零持仓"
+        if not holdings:
+            holdings = create_sample_holdings()
+            source = "⚠️ 示例数据（真实持仓不可用），结论不反映真实组合"
 
     pc = get_default_constraints()
-    holdings = create_sample_holdings()
     result = pc.check_all(holdings)
+
+    print(f"  数据源: {source}")
+    for w in warnings:
+        print(f"  ⚠️  {w}")
+    print()
     print(pc.format_report(result))
+
+    # 组合总览：把最大的几个仓位显式列出来，避免再次出现"约束全绿但单股 61%"的假象
+    if holdings and not use_sample:
+        total = sum(h["value_hkd"] for h in holdings)
+        if total > 0:
+            top = sorted(holdings, key=lambda h: -h["value_hkd"])[:5]
+            print()
+            print("  仓位占比 Top5:")
+            for h in top:
+                pct = h["value_hkd"] / total * 100
+                flag = "❌ 超30%硬线" if pct > 30 else ("⚠️ 超25%软线" if pct > 25 else "")
+                print(f"    {h['ticker']:<10} {h['name']:<12} {pct:>5.1f}%  HK${h['value_hkd']:>12,.0f}  {flag}")
+
+
+def cmd_review(args):
+    """复盘 — 预期 vs 实际回检（闭环环节③）。
+
+    此前 review_engine.py 的 15 个方法完全没有 CLI 入口，只被测试调用，
+    等于复盘环节是死代码。本命令把它接到主链路上。
+    """
+    from src.strategy.review_engine import ReviewEngine
+    from src.strategy.decision import DecisionLog
+    from src.strategy.position import default_decision_db
+
+    decision_db = default_decision_db()
+    action = getattr(args, "review_action", None) or "stats"
+    log = DecisionLog(decision_db)
+    # conn=log.conn 复用同一连接，避免 DuckDB 双连接锁死
+    engine = ReviewEngine(db_path=decision_db, decision_log=log, conn=log.conn)
+
+    try:
+        if action == "pending":
+            print("  到期待复盘决策")
+            print("  " + "-" * 60)
+            total = 0
+            for period in ("1w", "1m", "6m", "12m"):
+                recs = engine._get_decision_log().get_pending_reviews(period) or []
+                total += len(recs)
+                print(f"\n  ⏰ {period} ({len(recs)} 条)")
+                for r in recs:
+                    print(f"     {r.decision_date}  {r.ticker:<12} {r.action:<7} "
+                          f"@ {getattr(r, 'price', 0)}  [{r.decision_id}]")
+            print()
+            print(f"  合计 {total} 条待复盘。跑 `manage.py review run` 批量回检。")
+
+        elif action == "run":
+            period = getattr(args, "period", None) or "6m"
+            fetch = _make_price_fetcher()
+            results = engine.batch_review(period=period, fetch_current_fn=fetch)
+            print(f"  批量回检 period={period}: {len(results)} 条")
+            print()
+            for r in results:
+                print(engine.format_review_report(r))
+                print()
+            if not results:
+                print("  （没有到期决策，或无法取得现价）")
+                print("  提示: 现价取自 portfolio_data.json 的 prices 缓存；")
+                print("        先跑 `python3 ~/.hermes/scripts/portfolio_status.py refresh` 可提高回填率。")
+
+        elif action == "quick":
+            period = getattr(args, "period", None) or "1w"
+            fetch = _make_price_fetcher()
+            results = engine.quick_review(period=period, fetch_current_fn=fetch)
+            stats = engine.get_quick_review_stats(period)
+            print(f"  快速复盘 period={period}: {len(results)} 条")
+            for k, v in stats.items():
+                print(f"    {k}: {v}")
+
+        elif action == "dims":
+            eff = engine.analyze_dimension_effectiveness()
+            print(engine.format_dimension_report(eff))
+
+        elif action == "biases":
+            patterns = engine.analyze_cognitive_biases()
+            print(engine.format_bias_report(patterns))
+
+        elif action == "alerts":
+            stats = engine.get_alert_accuracy_stats()
+            if not stats:
+                print("  暂无预警准确率数据（需先 record_alert_outcome）")
+            for s in stats:
+                print(f"  {s}")
+
+        else:  # stats
+            print("  复盘统计")
+            print("  " + "-" * 60)
+            s = engine.get_review_stats()
+            for k, v in s.items():
+                print(f"    {k}: {v}")
+            print()
+            for period in ("1w", "1m"):
+                q = engine.get_quick_review_stats(period)
+                print(f"  快检 {period}: {q}")
+            print()
+            print("  可用动作: pending | run | quick | dims | biases | alerts | stats")
+    finally:
+        try:
+            engine.conn.close()
+        except Exception:
+            pass
+
+
+def _make_price_fetcher():
+    """从 portfolio_data.json 的 prices 缓存构造现价取数函数（离线、可复现）。"""
+    import json as _json
+    path = os.path.expanduser("~/.hermes/portfolio_data.json")
+    prices = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = _json.load(f)
+        for t, p in (raw.get("prices", {}) or {}).items():
+            v = p.get("price") if isinstance(p, dict) else p
+            if v:
+                prices[str(t).upper()] = float(v)
+    except Exception:
+        pass
+
+    def fetch(ticker: str):
+        key = str(ticker).upper()
+        if key in prices:
+            return prices[key]
+        bare = key.lstrip("0").replace(".HK", "")
+        for k, v in prices.items():
+            if k.lstrip("0").replace(".HK", "") == bare:
+                return v
+        raise KeyError(f"无缓存价格: {ticker}")
+
+    return fetch
+
+
+def cmd_feedback(args):
+    """闭环反馈 — 把复盘结论回灌到评分权重（闭环环节④）。"""
+    from src.strategy import feedback as fb
+
+    if getattr(args, "reset", False):
+        ok = fb.reset_feedback()
+        print("  ✅ 已删除 feedback_weights.json，评分权重恢复内置基准。" if ok
+              else "  ⚠️ 删除失败。")
+        return
+
+    report = fb.build_report()
+    if getattr(args, "apply", False):
+        fb.apply_feedback(report, write=True)
+    print(fb.format_report(report))
+
+
+def cmd_loop(args):
+    """闭环健康检查 — 分析→记录→复盘→反馈 是否真的连成闭环。"""
+    from src.ops.closed_loop import run_check, format_report
+    report = run_check()
+    print(format_report(report))
+    if getattr(args, "strict", False) and not report.closed:
+        raise SystemExit(1)
 
 
 def cmd_sell_alerts(args):
@@ -1849,7 +2057,9 @@ def main():
     p_indicators.add_argument("ticker", nargs="?", help="按股票过滤")
 
     # constraints
-    subparsers.add_parser("constraints", help="组合约束检查")
+    p_cons = subparsers.add_parser("constraints", help="组合约束检查")
+    p_cons.add_argument("--sample", action="store_true",
+                        help="用演示数据（默认读真实持仓 portfolio_data.json）")
 
     # sell-alerts
     p_sell = subparsers.add_parser("sell-alerts", help="卖出提醒扫描")
@@ -1867,6 +2077,25 @@ def main():
 
     # regime
     subparsers.add_parser("regime", help="市场环境检测")
+
+    # review（闭环环节③：复盘）
+    p_review = subparsers.add_parser("review", help="复盘：预期 vs 实际回检")
+    p_review.add_argument(
+        "review_action", nargs="?", default="stats",
+        choices=["pending", "run", "quick", "dims", "biases", "alerts", "stats"],
+        help="pending=到期待复盘 run=批量回检 quick=短周期快检 dims=维度预测力 "
+             "biases=认知偏差 alerts=预警准确率 stats=汇总(默认)",
+    )
+    p_review.add_argument("--period", default=None, help="周期: 1w / 1m / 6m / 12m")
+
+    # feedback（闭环环节④：复盘结论回灌评分权重）
+    p_fb = subparsers.add_parser("feedback", help="闭环反馈：复盘结论回灌评分权重")
+    p_fb.add_argument("--apply", action="store_true", help="写入 config/feedback_weights.json")
+    p_fb.add_argument("--reset", action="store_true", help="删除覆盖文件，恢复内置权重")
+
+    # loop（闭环健康检查）
+    p_loop = subparsers.add_parser("loop", help="闭环健康检查：分析→记录→复盘→反馈")
+    p_loop.add_argument("--strict", action="store_true", help="存在断点时以非零退出码结束")
 
     args = parser.parse_args()
 
@@ -1897,6 +2126,9 @@ def main():
         "regime": cmd_regime,
         "calibrate": cmd_calibrate,
         "migrate-trades": cmd_migrate_trades,
+        "review": cmd_review,
+        "feedback": cmd_feedback,
+        "loop": cmd_loop,
     }
 
     func = commands.get(args.command)

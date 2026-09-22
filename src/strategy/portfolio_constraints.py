@@ -264,7 +264,7 @@ class PortfolioConstraints:
             lines.append(f"\n⚠️  仓位超限 ({len(pv)}):")
             for v in pv:
                 lines.append(
-                    f"  {v['ticker']} {v['name']}: {v['pct']}% > {v['limit']}% "
+                    f"  {v['ticker']} {v['name']}: {v['pct']:.2f}% > {v['limit']:.1f}% "
                     f"(HK${v['value_hkd']:,.0f})"
                 )
         else:
@@ -275,7 +275,7 @@ class PortfolioConstraints:
             lines.append(f"\n⚠️  行业集中度过高 ({len(sv)}):")
             for v in sv:
                 lines.append(
-                    f"  {v['sector']}: {v['pct']}% > {v['limit']}% "
+                    f"  {v['sector']}: {v['pct']:.2f}% > {v['limit']:.1f}% "
                     f"(HK${v['value_hkd']:,.0f})"
                 )
         else:
@@ -286,7 +286,7 @@ class PortfolioConstraints:
             lines.append(f"\n⚠️  市场暴露过高 ({len(mv)}):")
             for v in mv:
                 lines.append(
-                    f"  {v['market']}: {v['pct']}% > {v['limit']}% "
+                    f"  {v['market']}: {v['pct']:.2f}% > {v['limit']:.1f}% "
                     f"(HK${v['value_hkd']:,.0f})"
                 )
         else:
@@ -297,7 +297,7 @@ class PortfolioConstraints:
             lines.append(f"\n⚠️  相关性组超限 ({len(cv)}):")
             for v in cv:
                 lines.append(
-                    f"  {v['group']}: {v['pct']}% > {v['limit']}% — {v['reason']}"
+                    f"  {v['group']}: {v['pct']:.2f}% > {v['limit']:.1f}% — {v['reason']}"
                 )
         else:
             lines.append("\n✅ 相关性组合规")

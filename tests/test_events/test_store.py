@@ -45,9 +45,18 @@ def test_add_and_retrieve(store):
 
 
 def test_filter_by_ticker(store):
-    store.add_event(_make_event(affected_tickers=["AAPL"]))
-    store.add_event(_make_event(affected_tickers=["TSLA"], title="TSLA Earnings", event_date="2026-07-20"))
-    store.add_event(_make_event(affected_tickers=["GOOG"], title="GOOG Earnings", event_date="2026-07-21"))
+    # 事件日期必须相对「今天」生成——写死日期会在时间流逝后落到过去，
+    # get_upcoming() 就一条也查不出来（2026-09-22 实测 2026-07-20 已成历史）。
+    from datetime import date, timedelta   # 局部导入：避免改动文件头
+    today = date.today()
+    store.add_event(_make_event(
+        affected_tickers=["AAPL"], event_date=str(today + timedelta(days=9))))
+    store.add_event(_make_event(
+        affected_tickers=["TSLA"], title="TSLA Earnings",
+        event_date=str(today + timedelta(days=10))))
+    store.add_event(_make_event(
+        affected_tickers=["GOOG"], title="GOOG Earnings",
+        event_date=str(today + timedelta(days=11))))
 
     results = store.get_upcoming(days=30, tickers=["TSLA"])
     assert len(results) == 1

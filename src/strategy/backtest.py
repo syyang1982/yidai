@@ -10,8 +10,10 @@ import math
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.data.models import _compute_grade, _compute_signal
-from src.analysis import profitability, health, cashflow, valuation, growth
+from src.data.models import (
+    _compute_grade, _compute_signal, normalize_total, DIMENSIONS_EXCEPT_DIVIDEND,
+)
+from src.analysis import profitability, health, cashflow, valuation, growth, dividend_quality
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +393,26 @@ class BacktestEngine:
                 "growth_drivers": period_drivers,
             })
 
-            # ==== D6-D7 qualitative ====
+            # ==== D6 dividend quality ====
+            # 2026-09-22 修复：此前这里硬编码 0 且不计入 total，
+            # 于是 7 维 total(满分 35) 被喂给按 8 维 40 分校准的
+            # _compute_grade / _compute_signal —— BUY 需 >=33，等于要拿 35 里的 94%，
+            # 回测里的 BUY 被系统性压制。现在与 scorer.py 同口径评 D6。
+            _price_for_div = price_info[1] if price_info else 0
+            _dps = fin.get("dividend_per_share") or 0
+            if _dps == 0:
+                _td = fin.get("total_dividends") or 0
+                _sh = fin.get("shares_outstanding") or 0
+                _dps = _td / _sh if _td > 0 and _sh > 0 else 0
+            _eps = fin.get("eps") or 0
+            div_res = dividend_quality.score({
+                "has_dividend": _dps > 0,
+                "dividend_yield": _dps / _price_for_div if _price_for_div > 0 else 0,
+                "payout_ratio": _dps / _eps if _eps > 0 else None,
+                "dividend_growth_rates": [],
+            })
+
+            # ==== D7-D8 qualitative ====
             own = ownership_scores.get(period, 4)
             strat = strategy_scores.get(period, 4)
 
@@ -402,18 +423,25 @@ class BacktestEngine:
                 + cf_res["score"]
                 + val_res["score"]
                 + grow_res["score"]
+                + div_res["score"]
                 + own
                 + strat
             )
-            grade = _compute_grade(total)
+            # W7.10 实评维度归一化：无分红数据时 D6 未实评，
+            # 归一到 8 维 40 分制再分档/发信号（否则 BUY 需 35 分里拿 94%）。
+            _scored = (
+                None if div_res.get("has_data", True) else DIMENSIONS_EXCEPT_DIVIDEND
+            )
+            norm_total = normalize_total(total, _scored)
+            grade = _compute_grade(norm_total)
             signal = _compute_signal(
-                total,
+                norm_total,
                 prof_res["score"],
                 health_res["score"],
                 cf_res["score"],
                 val_res["score"],
                 grow_res["score"],
-                0,  # dividend_score (not available in backtest)
+                div_res["score"],
                 own,
                 strat,
             )

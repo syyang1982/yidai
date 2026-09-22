@@ -26,7 +26,7 @@ def _good_financial(period: str, report_date: str, *, revenue, gross_profit,
                     net_income, total_assets, total_liabilities, total_equity,
                     current_assets, current_liabilities, interest_bearing_debt,
                     operating_cash_flow, free_cash_flow, eps=None,
-                    shares_outstanding=None) -> dict:
+                    shares_outstanding=None, dividend_per_share=None) -> dict:
     """Build a financial dict that scores well on all dimensions."""
     d = {
         "period": period,
@@ -47,6 +47,8 @@ def _good_financial(period: str, report_date: str, *, revenue, gross_profit,
         d["eps"] = eps
     if shares_outstanding is not None:
         d["shares_outstanding"] = shares_outstanding
+    if dividend_per_share is not None:
+        d["dividend_per_share"] = dividend_per_share
     return d
 
 
@@ -128,6 +130,11 @@ def three_year_data():
             eps=2.0, shares_outstanding=10_000_000,
         ),
     ]
+    # 「全面优秀」必须覆盖 D6 分红质量：8 维满分 40，漏了 D6 就白丢 4-5 分，
+    # 再优秀的公司也够不到 A / BUY（2026-09-22 修的正是这类坑）。
+    # dps 取值保证 股息率>=3%（+3）且 分红率<50%（+1）→ D6=4。
+    for _f, _dps in zip(financials, (0.5, 0.7, 0.9)):
+        _f["dividend_per_share"] = _dps
 
     prices = _make_stepped_prices(
         ("2022-01-01", 15),

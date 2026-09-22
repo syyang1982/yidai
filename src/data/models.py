@@ -16,8 +16,11 @@ Dimension weights (from multi-window accuracy audit 2026-08-29):
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field
 from datetime import date
+from functools import lru_cache
 from typing import Dict, Optional
 
 
@@ -25,6 +28,11 @@ from typing import Dict, Optional
 # Dimension weights — based on multi-window accuracy audit (2026-08-29)
 # Each dimension score (0-5) is multiplied by its weight for signal decisions.
 # Raw total_score (unweighted) is still used for grade calculation.
+#
+# 闭环反馈 (2026-09-22): 权重可被 config/feedback_weights.json 覆盖。
+# 复盘结论 (维度预测力) 经 src/strategy/feedback.py 计算后写入该文件，
+# 从而形成 分析 → 记录 → 复盘 → 反馈回分析 的完整闭环。
+# 未生成覆盖文件时行为与之前完全一致（默认权重）。
 # ---------------------------------------------------------------------------
 DIMENSION_WEIGHTS: Dict[str, float] = {
     "profitability": 0.5,   # 反预测力(-0.35), 降权
@@ -36,6 +44,40 @@ DIMENSION_WEIGHTS: Dict[str, float] = {
     "ownership":     1.2,   # 强预测力(+0.50), 加权
     "strategy":      1.2,   # 强预测力(+0.50), 加权
 }
+
+# 复盘回灌的覆盖文件位置（不存在则用 DIMENSION_WEIGHTS）
+FEEDBACK_WEIGHTS_FILE = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "config", "feedback_weights.json"
+))
+
+
+@lru_cache(maxsize=1)
+def load_dimension_weights() -> Dict[str, float]:
+    """Return effective dimension weights.
+
+    优先读 config/feedback_weights.json（由 manage.py feedback --apply 生成），
+    文件缺失或格式非法时回退到内置 DIMENSION_WEIGHTS，绝不抛异常。
+    只接受 8 个已知维度的完整覆盖，缺键/多键一律拒绝并回退。
+    """
+    try:
+        with open(FEEDBACK_WEIGHTS_FILE, encoding="utf-8") as f:
+            raw = json.load(f)
+        weights = raw.get("weights", raw) if isinstance(raw, dict) else None
+        if not isinstance(weights, dict):
+            return dict(DIMENSION_WEIGHTS)
+        if set(weights) != set(DIMENSION_WEIGHTS):
+            return dict(DIMENSION_WEIGHTS)
+        out = {k: float(weights[k]) for k in DIMENSION_WEIGHTS}
+        if any(v <= 0 for v in out.values()):
+            return dict(DIMENSION_WEIGHTS)
+        return out
+    except Exception:
+        return dict(DIMENSION_WEIGHTS)
+
+
+def reset_dimension_weights_cache() -> None:
+    """Clear the cached weights (for tests / after writing an override)."""
+    load_dimension_weights.cache_clear()
 
 
 def _compute_weighted_total(
@@ -53,7 +95,8 @@ def _compute_weighted_total(
         "growth": growth, "dividend": dividend,
         "ownership": ownership, "strategy": strategy,
     }
-    return sum(scores[k] * DIMENSION_WEIGHTS[k] for k in DIMENSION_WEIGHTS)
+    weights = load_dimension_weights()
+    return sum(scores[k] * weights[k] for k in weights)
 
 
 # ---------------------------------------------------------------------------
@@ -160,15 +203,52 @@ _GRADE_THRESHOLDS = [
 ]
 
 
-def _compute_grade(total: int) -> str:
+def _compute_grade(total: float) -> str:
     for threshold, letter in _GRADE_THRESHOLDS:
         if total >= threshold:
             return letter
     return "F"
 
 
+# ---------------------------------------------------------------------------
+# 实评维度归一化 (2026-09-22, W7.10)
+# ---------------------------------------------------------------------------
+# 分档 (_GRADE_THRESHOLDS) 与信号阈值都是按「8 维 / 满分 40」校准的，
+# 但某些维度可能没有数据（最典型：不发股息的公司 D6，以及 review/backtest
+# 这类只有 7 个维度字段的记录）。直接拿 7 维满分 35 的 raw total 去比 33 的
+# BUY 线，等价于要求 35 分里拿 94% —— BUY 被系统性压制。
+#
+# 因此：分档与信号一律用「归一到 8 维 40 分制」的分数，
+# raw total 仍保留用于展示与历史对比。
+# ---------------------------------------------------------------------------
+DIMENSION_KEYS: tuple = (
+    "profitability", "health", "cashflow", "valuation",
+    "growth", "dividend", "ownership", "strategy",
+)
+
+#: 无分红数据时 D6 不计入分母（与 _compute_signal 中「dividend=0 表示无数据」同口径）
+DIMENSIONS_EXCEPT_DIVIDEND: tuple = tuple(k for k in DIMENSION_KEYS if k != "dividend")
+
+_MAX_PER_DIM = 5
+_FULL_SCALE = _MAX_PER_DIM * len(DIMENSION_KEYS)   # 40
+
+
+def normalize_total(raw_total: float, scored_dimensions=None) -> float:
+    """把「只实评了 n 个维度」的原始总分换算到 8 维 40 分制。
+
+    ``scored_dimensions=None`` 表示 8 个维度全部实评 —— 此时原样返回，
+    对既有全量评分零行为变化。
+    """
+    n = len(DIMENSION_KEYS) if scored_dimensions is None else len(scored_dimensions)
+    if n <= 0:
+        return 0.0
+    if n >= len(DIMENSION_KEYS):
+        return float(raw_total)
+    return float(raw_total) * _FULL_SCALE / (_MAX_PER_DIM * n)
+
+
 def _compute_signal(
-    total: int,
+    total: float,
     profitability: int,
     health: int,
     cashflow: int,
@@ -313,6 +393,9 @@ class ScoreResult:
     # --- auto-computed (excluded from __init__) ---
     total_score: int = field(init=False)
     weighted_total: float = field(init=False)
+    #: 实评维度个数 + 归一到 8 维 40 分制的分数（分档/信号用它，不用 raw total）
+    scored_count: int = field(init=False)
+    normalized_total: float = field(init=False)
     grade: str = field(init=False)
     signal: str = field(init=False)
 
@@ -321,6 +404,10 @@ class ScoreResult:
     # --- missing health/cashflow inputs must not silently score as 3 and fire BUY ---
     data_complete: bool = True
     missing_fields: list = field(default_factory=list)
+    #: 实际评了哪几个维度（DIMENSION_KEYS 的子集）。
+    #: None = 8 维全部实评（既有全量评分零行为变化）。
+    #: 无分红数据时传 DIMENSIONS_EXCEPT_DIVIDEND，D6 不计入归一化分母。
+    scored_dimensions: Optional[tuple] = None
 
     # --- improvement fields (optional) ---
     pe_percentile: Optional[float] = None
@@ -341,15 +428,31 @@ class ScoreResult:
             + self.ownership_score
             + self.strategy_score
         )
+        self.scored_count = (
+            len(DIMENSION_KEYS) if self.scored_dimensions is None
+            else len(self.scored_dimensions)
+        )
+        # 分档 / 信号一律用归一到 8 维 40 分制的分数（理由见 normalize_total）
+        self.normalized_total = normalize_total(self.total_score, self.scored_dimensions)
         self.weighted_total = _compute_weighted_total(
             self.profitability_score, self.health_score,
             self.cashflow_score, self.valuation_score,
             self.growth_score, self.dividend_score,
             self.ownership_score, self.strategy_score,
         )
-        self.grade = _compute_grade(self.total_score)
+        # 加权分同样归一到「全维度」口径（满分 sum(weights)*5 ≈ 41），
+        # 否则缺维度的公司照样够不到 BUY 门槛。
+        if self.scored_dimensions is not None and self.scored_count < len(DIMENSION_KEYS):
+            _w_scored = sum(
+                DIMENSION_WEIGHTS[k] for k in self.scored_dimensions
+                if k in DIMENSION_WEIGHTS
+            )
+            _w_all = sum(DIMENSION_WEIGHTS.values())
+            if _w_scored > 0:
+                self.weighted_total = self.weighted_total * _w_all / _w_scored
+        self.grade = _compute_grade(self.normalized_total)
         self.signal = _compute_signal(
-            self.total_score,
+            self.normalized_total,
             self.profitability_score,
             self.health_score,
             self.cashflow_score,

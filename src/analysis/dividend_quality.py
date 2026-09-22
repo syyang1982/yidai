@@ -47,7 +47,9 @@ def score(data: dict) -> dict:
 
     if not has_dividend:
         details.append("分红质量: 无分红 — score 0")
-        return {"score": 0, "details": details}
+        # has_data=False → 调用方应把 D6 当作「未实评」，不计入归一化分母
+        # （与 _compute_signal 的「dividend=0 表示无数据」同口径）
+        return {"score": 0, "details": details, "has_data": False}
 
     dy = data.get("dividend_yield", 0) or 0
     pr = data.get("payout_ratio")  # 可能为None
@@ -122,7 +124,7 @@ def score(data: dict) -> dict:
     final_score = min(5, max(0, final_score))
     details.append(f"分红质量总分: {dy_score} + {pr_bonus} + {growth_bonus} = {final_score}/5")
 
-    return {"score": final_score, "details": details}
+    return {"score": final_score, "details": details, "has_data": True}
 
 
 def compute_dividend_metrics(

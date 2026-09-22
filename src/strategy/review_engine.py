@@ -83,20 +83,29 @@ class AlertAccuracy:
 class ReviewEngine:
     """预期验证引擎。"""
 
-    def __init__(self, db_path: str = None, decision_log: DecisionLog = None):
-        if db_path is None:
-            db_path = ":memory:"
-        self.db_path = db_path
-        self.conn = duckdb.connect(db_path)
+    def __init__(self, db_path: str = None, decision_log: DecisionLog = None, conn=None):
+        # conn 不为 None 时复用外部连接（同一个 duckdb 文件不能开两个写连接）
+        if conn is not None:
+            self.db_path = db_path or ":memory:"
+            self.conn = conn
+        else:
+            if db_path is None:
+                db_path = ":memory:"
+            self.db_path = db_path
+            self.conn = duckdb.connect(db_path)
         self._decision_log = decision_log
         self._create_tables()
 
     def _get_decision_log(self) -> DecisionLog:
-        """Get or create a DecisionLog instance."""
+        """Get or create a DecisionLog instance.
+
+        复用 self.conn：同一个 DuckDB 文件不能开两个写连接，会锁死。
+        """
         if self._decision_log is not None:
             return self._decision_log
         from src.strategy.decision import DecisionLog
-        return DecisionLog(self.db_path)
+        self._decision_log = DecisionLog(self.db_path, conn=self.conn)
+        return self._decision_log
 
     def _create_tables(self):
         self.conn.execute("""

@@ -17,7 +17,9 @@ from typing import Dict, List, Optional
 
 import duckdb
 
-from src.data.models import _compute_grade, _compute_signal
+from src.data.models import (
+    _compute_grade, _compute_signal, normalize_total, DIMENSIONS_EXCEPT_DIVIDEND,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -296,9 +298,12 @@ class ReviewEngine:
                 cur[k] = current_scores[k]
 
         total_score = sum(cur[k] for k in _DIM_KEYS)
-        grade = _compute_grade(total_score)
+        # W7.10：review 的记录只有 7 个维度字段（无 dividend），
+        # 必须归一到 8 维 40 分制再分档，否则满分 35 卡死 A / BUY。
+        _norm_total = normalize_total(total_score, DIMENSIONS_EXCEPT_DIVIDEND)
+        grade = _compute_grade(_norm_total)
         signal = _compute_signal(
-            total_score,
+            _norm_total,
             cur["profitability_score"], cur["health_score"],
             cur["cashflow_score"], cur["valuation_score"],
             cur["growth_score"], cur.get("dividend_score", 0),
@@ -447,7 +452,9 @@ class ReviewEngine:
             exit_dim[k] = exit_scores.get(k, exit_scores.get(short, 0))
 
         exit_total = sum(exit_dim[k] for k in _DIM_KEYS)
-        exit_grade = _compute_grade(exit_total)
+        exit_grade = _compute_grade(
+            normalize_total(exit_total, DIMENSIONS_EXCEPT_DIVIDEND)
+        )
 
         # P&L
         return_pct = (
@@ -700,9 +707,12 @@ class ReviewEngine:
             cur[k] = current_scores.get(k, current_scores.get(short, 0))
 
         total_score = sum(cur[k] for k in _DIM_KEYS)
-        grade = _compute_grade(total_score)
+        # W7.10：review 的记录只有 7 个维度字段（无 dividend），
+        # 必须归一到 8 维 40 分制再分档，否则满分 35 卡死 A / BUY。
+        _norm_total = normalize_total(total_score, DIMENSIONS_EXCEPT_DIVIDEND)
+        grade = _compute_grade(_norm_total)
         signal = _compute_signal(
-            total_score,
+            _norm_total,
             cur["profitability_score"], cur["health_score"],
             cur["cashflow_score"], cur["valuation_score"],
             cur["growth_score"], cur.get("dividend_score", 0),

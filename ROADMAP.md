@@ -239,13 +239,30 @@ python manage.py decision add TICKER --confidence 4 --counter-argument "..." --i
 
 | # | 工作项 | 描述 | 状态 |
 |---|--------|------|------|
-| W5.1 | constraints 读真实持仓 | `cmd_constraints` 现用 `create_sample_holdings()` 假数据 → 假绿灯（小米 61.1% 超 30% 硬线却报合规） | 🔲 |
-| W5.2 | 对账两套持仓数据 | decisions.duckdb vs portfolio_data.json：5 处股数（LX/2252/3896/09988/01810）+ 1 处均价（3888）不一致，需确认口径 | 🔲 |
-| W5.3 | dashboard.py CNY→HKD 换算 | 名创显示 -54.7% 应为 -60.5%（sell_alert.py 已修，dashboard.py 未跟上） | 🔲 |
-| W5.4 | ASX 持仓漏计 | dashboard 完全不显示 SGP.AX；portfolio_status 总计漏计，dashboard 又按 1:1 当 HKD | 🔲 |
-| W5.5 | 小米集中度显式备案 | 61.1% 超 30% 硬线，写成「已知偏离 + 计划」（HK$33-35 减 1-2K 短线仓、核心 ~34K） | 🔲 |
-| W5.6 | 清理 1361.HK 残留 | 0 股仍占 dashboard 一行 + sell_targets 目标价 HK$6.5 | 🔲 |
-| W5.7 | 3888.HK 金山软件观察 | REDUCE 24/40、-6.6%，止损 -30%，不加仓 | 🔲 |
+| W5.1 | constraints 读真实持仓 | `cmd_constraints` 现用 `create_sample_holdings()` 假数据 → 假绿灯（小米 61.1% 超 30% 硬线却报合规） | ✅ 2026-09-22 改读 portfolio_data.json |
+| W5.2 | 对账两套持仓数据 | decisions.duckdb vs portfolio_data.json：5 处股数（LX/2252/3896/09988/01810）+ 1 处均价（3888）不一致，需确认口径 | ⏳ `manage.py loop` 已能自动检出（实测 7 处），口径待用户确认后 `position set` 修正 |
+| W5.3 | dashboard.py CNY→HKD 换算 | 名创显示 -54.7% 应为 -60.5%（sell_alert.py 已修，dashboard.py 未跟上） | ✅ 2026-09-22 改用 `to_hkd`，实测 -60.5% |
+| W5.4 | ASX 持仓漏计 | dashboard 完全不显示 SGP.AX；portfolio_status 总计漏计，dashboard 又按 1:1 当 HKD | ✅ 2026-09-22 补 AUD_PER_HKD=0.17936，实测显示 +7.2%、总市值 +25,206 HKD |
+| W5.5 | 小米集中度显式备案 | 61.1% 超 30% 硬线，写成「已知偏离 + 计划」（HK$33-35 减 1-2K 短线仓、核心 ~34K） | 🔲 待用户决策 |
+| W5.6 | 清理 1361.HK 残留 | 0 股仍占 dashboard 一行 + sell_targets 目标价 HK$6.5 | ⏳ dashboard 已归入「已清仓（0 股，不计入）」，sell_targets 待清 |
+| W5.7 | 3888.HK 金山软件观察 | REDUCE 24/40、-6.6%，止损 -30%，不加仓 | 🔲 待用户决策 |
+
+### 2026-09-22 闭环打通（W7）
+
+> **问题：** 代码审查发现 `review.py`(785 行) + `review_engine.py`(697 行) 共 1482 行**零入口**（只被 tests 引用），复盘环节从未真正运行；`DIMENSION_WEIGHTS` 硬编码在 `models.py`，复盘结论无法回到评分层。四环节只有①分析真正跑通 → **是开环，不是闭环**。
+
+| # | 工作项 | 描述 | 状态 |
+|---|--------|------|------|
+| W7.1 | 环节③接活复盘引擎 | `manage.py review`（pending/run/quick/dims/biases/alerts/stats）——1482 行死代码首次有 CLI 入口 | ✅ 实测 `review pending` 列出 80 条到期决策 |
+| W7.2 | 环节④反灌层 | 新建 `src/strategy/feedback.py`：复盘结论 → 维度有效性 → `DIMENSION_WEIGHTS` + 阈值建议 | ✅ `manage.py feedback [--apply\|--reset]`，带 30 条/维安全闸 |
+| W7.3 | 闭环健康检查 | 新建 `src/ops/closed_loop.py`：逐环节数据流体检 + 断点显式列出（只读） | ✅ `manage.py loop`，实测报出 4 处断点 |
+| W7.4 | CJK 对齐表格工具 | 新建 `src/ops/text_table.py`（双宽字符列宽），供 feedback/closed_loop 复用 | ✅ |
+| W7.5 | DuckDB 连接复用 | `DecisionLog`/`ReviewEngine` 支持 `conn=`，消除同文件双写锁 | ✅ |
+| W7.6 | 统一决策记录口径 | DecisionLog 为唯一决策事实源（decision_log + positions），SignalTracker 只作信号事实层 | ⏳ 代码已按此分层，数据待 W5.2 对账后收敛 |
+| W7.7 | 信号分桶兜底 + 完整性核对 | dashboard 未知信号不再静默丢持仓，渲染后核对行数 | ✅ 实测 12 个非零持仓全部渲染 + 1 个已清仓单列 |
+| W7.8 | 回测漏评 D6 导致 BUY 被压制 | `backtest.py` 只评 7 维却把 total(满分35)喂给 8 维/40 分校准的 `_compute_grade`/`_compute_signal`（BUY 需 ≥33 = 35 里拿 94%）→ 回测几乎永不 BUY | ✅ 2026-09-22 与 scorer.py 同口径评 D6 |
+| W7.9 | 测试漂移清理 | 8 个失败全在改动前就存在（已用干净 HEAD worktree 对照确认）：6 个是 /35→/40 分档未同步、2 个是硬编码日期随时间腐烂 | ✅ 982 passed / 0 failed |
+| W7.10 | 无分红公司结构性够不到 A | `dividend=0 表示「无数据」`（代码注释明写），却仍按 0 计入 total → 不发股息的成长股满分只有 35，比发股息的低一档 | ✅ 2026-09-22 按实评维度归一化（用户裁决）：新增 `models.normalize_total` + `ScoreResult.scored_dimensions/normalized_total`，`dividend_quality.score` 增 `has_data`；`scorer`/`backtest`/`review`(3处)/`manage.py`(2处)/5 个 `scripts/analyze_*.py` 共 12 个调用点全改 |
 
 ---
 
@@ -259,8 +276,15 @@ python manage.py decision add TICKER --confidence 4 --counter-argument "..." --i
 | 2026-08-28 | 📋 模块六/七/八规划完成 — 信号准确率审计+领先指标追踪+组合约束层 |
 
 | 2026-09-09 | ✅ W2.1.3 trade-log迁移脚本 (41条交易→DuckDB决策日志) |
-|| 2026-09-09 | ✅ W2.3.1 阈值校准模块 (157条信号分析, 发现市场环境自适应需求) ||
-|| 2026-09-13 | ✅ W2.1.4 历史决策补录 (41条交易→decisions.duckdb, 37条含七维评分) ||
-|| 2026-09-13 | ✅ 模块九：决策反馈闭环 (P1理由分类学+P2快检+P3周报集成+P4认知偏差) ||
-|| 2026-09-13 | ✅ 模块十：持仓实体+类比检索+缺失数据阻断BUY；规范库 decisions.duckdb ||
-|| 2026-09-22 | 📋 持仓诊断待办登记：D1-D4（P0 决策）+ W5.1-W5.7（P1/P2 数据修复） ||
+| 2026-09-09 | ✅ W2.3.1 阈值校准模块 (157条信号分析, 发现市场环境自适应需求) |
+| 2026-09-13 | ✅ W2.1.4 历史决策补录 (41条交易→decisions.duckdb, 37条含七维评分) |
+| 2026-09-13 | ✅ 模块九：决策反馈闭环 (P1理由分类学+P2快检+P3周报集成+P4认知偏差) |
+| 2026-09-13 | ✅ 模块十：持仓实体+类比检索+缺失数据阻断BUY；规范库 decisions.duckdb |
+| 2026-09-22 | 📋 持仓诊断待办登记：D1-D4（P0 决策）+ W5.1-W5.7（P1/P2 数据修复） |
+| 2026-09-22 | ✅ W5.1/W5.3/W5.4 数据修复（constraints 真实持仓、dashboard 币种换算、ASX 漏计） |
+| 2026-09-22 | ✅ W7.1-W7.5/W7.7 闭环打通：`manage.py review`/`feedback`/`loop` 三个新入口，1482 行复盘死代码接活，权重反灌层建成 |
+| 2026-09-22 | ✅ W7.8 修复回测漏评 D6（7 维 total 喂给 8 维分档 → BUY 被系统性压制） |
+| 2026-09-22 | ✅ W7.9 清理 8 个既有测试漂移（/35→/40 分档未同步 6 个 + 硬编码日期腐烂 2 个），982 passed / 0 failed |
+| 2026-09-22 | 📋 W7.10 记录设计取舍：无分红公司 total 满分只有 35，结构性够不到 A / BUY |
+| 2026-09-22 | ✅ W7.10 按实评维度归一化落地（用户裁决）。扫出并修掉 12 个同类调用点，含 6 处**从没成功跑过**的 `_compute_signal` 少传 dividend + dict 当 int 求和；`analyze` 显示改为「raw N/M（实评 k/8 维 → 归一 X/40）」。983 passed / 0 failed |
+| 2026-09-22 | 📌 W5.2 两库对账仅登记待办（用户明确不动手）：7 处不一致 = 5 处股数 + 2 处 ticker 写法（`SGP.AX`/`SGP.ASX`、`01810.HK`/`1810.HK`），口径确认后用 `position set` 修 |

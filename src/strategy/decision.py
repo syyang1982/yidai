@@ -90,11 +90,16 @@ class DecisionRecord:
 class DecisionLog:
     """决策日志管理器。"""
 
-    def __init__(self, db_path: str = None):
-        if db_path is None:
-            db_path = ":memory:"
-        self.db_path = db_path
-        self.conn = duckdb.connect(db_path)
+    def __init__(self, db_path: str = None, conn=None):
+        if conn is not None:
+            # 复用外部连接：同一个 DuckDB 文件不能开两个写连接，会锁死
+            self.db_path = db_path or ":memory:"
+            self.conn = conn
+        else:
+            if db_path is None:
+                db_path = ":memory:"
+            self.db_path = db_path
+            self.conn = duckdb.connect(db_path)
         self._create_tables()
 
     def _create_tables(self):

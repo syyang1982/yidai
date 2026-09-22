@@ -47,8 +47,11 @@ def _make_decision(
 ) -> DecisionRecord:
     """Helper to create a DecisionRecord with sensible defaults."""
     total = profitability + health + cashflow + valuation + growth + ownership + strategy
-    from src.data.models import _compute_grade
-    grade = _compute_grade(total)
+    from src.data.models import _compute_grade, normalize_total
+    # review 的记录只有 7 个维度（无 dividend）→ 必须与 review.py 同口径归一化
+    _dims7 = ("profitability", "health", "cashflow", "valuation",
+              "growth", "ownership", "strategy")
+    grade = _compute_grade(normalize_total(total, _dims7))
     return DecisionRecord(
         ticker=ticker,
         date=date,
@@ -361,22 +364,25 @@ class TestTakeSnapshot:
         assert "健康↓" in snap.dimension_changes
 
     def test_alerts_for_deterioration(self, engine):
+        # W7.10 归一化后：review 的 7 维 total 会 ×8/7 归一到 40 分制，
+        # 所以要让评级真的降级，得让归一分跨过 26 这条线（raw 需 < 22.75）。
         entry = _make_decision(
             price=100.0, profitability=5, health=5, cashflow=5,
-            valuation=4, growth=4, ownership=4, strategy=4,
-        )  # total=31, grade A, signal BUY
+            valuation=4, growth=4, ownership=3, strategy=2,
+        )  # raw 28 -> 归一 32.0 -> grade B
         engine.record_decision(entry)
 
-        # Health drops by 3
+        # 健康 -3、现金流 -2、成长 -1 -> raw 22 -> 归一 25.14 -> grade C
         new_scores = _scores(
-            profitability=5, health=2, cashflow=5,
-            valuation=4, growth=4, ownership=4, strategy=4,
-        )  # total=28, grade B
+            profitability=5, health=2, cashflow=3,
+            valuation=4, growth=3, ownership=3, strategy=2,
+        )
         snap = engine.take_snapshot("TEST", 90.0, new_scores, entry)
 
+        assert snap.total_score == 22
         assert snap.alerts != ""
         assert "健康大幅下降" in snap.alerts
-        assert "评级从A降至B" in snap.alerts
+        assert "评级从B降至C" in snap.alerts
 
     def test_alerts_for_signal_change(self, engine):
         entry = _make_decision(

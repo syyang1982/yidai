@@ -69,6 +69,20 @@ def _build_separator():
 
 
 # ── 数据加载 ──────────────────────────────────────────────
+def to_hkd(amount, ccy, rates):
+    """本币金额 → HKD。``xxx_PER_HKD`` 表示 1 HKD 折多少本币，故本币→HKD 是除法。
+
+    未知币种原样返回（绝不静默换算），由调用方决定如何呈现。
+    """
+    ccy = (ccy or "HKD").upper()
+    if ccy == "HKD":
+        return float(amount)
+    rate = rates.get(f"{ccy}_PER_HKD")
+    if not rate:
+        return float(amount)
+    return float(amount) / float(rate)
+
+
 def load_portfolio():
     path = os.path.expanduser("~/.hermes/portfolio_data.json")
     if not os.path.exists(path):
@@ -157,7 +171,11 @@ def main():
     companies = kb.list_companies()
     company_map = {c["ticker"]: c for c in companies}
     rates = load_exchange_rates()
+    rates.setdefault("USD_PER_HKD", 0.1282)      # 1 USD ≈ 7.80 HKD
+    rates.setdefault("CNY_PER_HKD", 0.872489)    # 1 CNY ≈ 1.1461 HKD
+    rates.setdefault("AUD_PER_HKD", 0.17936)     # 1 AUD ≈ 5.5753 HKD
     cny_per_hkd = rates.get("CNY_PER_HKD", 0.87)
+    closed = []          # 已清仓(0 股)：不进面板、不进分母
 
     # ── 收集数据 ──────────────────────────────────────────
     total_value = 0
@@ -167,9 +185,18 @@ def main():
     for h in holdings:
         ticker = h.get("ticker", "")
         name = h.get("name", ticker)
-        shares = h.get("shares", 0)
-        cost = h.get("avg_cost", 0)
-        ccy = h.get("price_ccy", "HKD")
+        shares = h.get("shares", 0) or 0
+        cost = h.get("avg_cost", 0) or 0
+        # 关键：value 用 price_ccy，cost 用 cost_ccy。
+        # 沪港通/深港通买入的票 cost_ccy=CNY 而 price_ccy=HKD，
+        # 两者混用会把亏损算少（名创 -54.7% 实为 -60.5%）。
+        price_ccy = (h.get("price_ccy") or "HKD").upper()
+        cost_ccy = (h.get("cost_ccy") or price_ccy).upper()
+        ccy = price_ccy
+
+        if shares <= 0:
+            closed.append({"ticker": ticker, "name": name})
+            continue
 
         score = get_latest_score(ticker)
 
@@ -177,22 +204,21 @@ def main():
         if score and score.get("price"):
             price = score["price"]
 
-        if ccy == "USD":
-            value_hkd = shares * price / rates.get("USD_PER_HKD", 0.128)
-            cost_hkd = shares * cost / rates.get("USD_PER_HKD", 0.128)
-        elif ccy == "CNY":
-            value_hkd = shares * price / cny_per_hkd
-            cost_hkd = shares * cost / cny_per_hkd
-        else:
-            value_hkd = shares * price
-            cost_hkd = shares * cost
+        value_hkd = to_hkd(shares * price, price_ccy, rates)
+        cost_hkd = to_hkd(shares * cost, cost_ccy, rates)
 
         total_value += value_hkd
         total_cost += cost_hkd
         pnl = value_hkd - cost_hkd
         pnl_pct = (pnl / cost_hkd * 100) if cost_hkd > 0 else 0
 
-        signal = score.get("signal", None) if score else None
+        raw_signal = score.get("signal", None) if score else None
+        # 只认已知信号值；任何未知值进"其他"桶。绝不让持仓落进未渲染的桶里。
+        if raw_signal in ("BUY", "HOLD", "REDUCE", "WATCH"):
+            signal = raw_signal
+        else:
+            signal = "其他" if raw_signal else None
+
         total_score = score.get("total_score", None) if score else None
         grade = score.get("grade", "") if score else ""
 
@@ -200,7 +226,7 @@ def main():
             "ticker": ticker, "name": name, "shares": shares,
             "price": price, "pnl_pct": pnl_pct,
             "score": total_score, "grade": grade,
-            "ccy": ccy,
+            "ccy": ccy, "raw_signal": raw_signal,
         })
 
     # ── 格式化一行 ────────────────────────────────────────
@@ -216,7 +242,7 @@ def main():
     def fmt_row(r, sig_type):
         pnl = r["pnl_pct"]
         arrow = "↑" if pnl > 0 else "↓" if pnl < 0 else "→"
-        score_str = f"{r['score']}/35" if r["score"] is not None else "N/A"
+        score_str = f"{r['score']}/40" if r["score"] is not None else "N/A"
         return _build_row([
             r["ticker"],
             r["name"],
@@ -256,24 +282,40 @@ def main():
     print(box_line("意怠工程 — 持仓 + 信号 统一面板"))
     print(box_bot())
 
-    signal_order = ["BUY", "HOLD", "REDUCE", None]
+    signal_order = ["BUY", "HOLD", "WATCH", "REDUCE", "其他", None]
     signal_labels = {
         "BUY":    "🟢 买入信号",
         "HOLD":   "🟡 持有信号",
+        "WATCH":  "🟠 观察信号",
         "REDUCE": "🔴 减仓信号",
+        "其他":    "❓ 其他信号",
         None:     "⚪ 无信号",
     }
+    # 兜底：任何计划外的信号桶也必须渲染，绝不静默丢持仓
+    for extra in list(rows_by_signal):
+        if extra not in signal_order:
+            signal_order.insert(-1, extra)
 
+    rendered = 0
     for sig in signal_order:
         rows = rows_by_signal.get(sig, [])
         if not rows:
             continue
-        label = signal_labels.get(sig, "")
+        rendered += len(rows)
+        label = signal_labels.get(sig, f"❔ {sig}")
         print(f"\n  {label} ({len(rows)}家)")
         print(_build_header())
         print(_build_separator())
         for r in rows:
             print(fmt_row(r, sig))
+
+    # ── 完整性核对：任何非零持仓都不许被静默丢弃 ──────────
+    n_nonzero = sum(1 for h in holdings if (h.get("shares", 0) or 0) > 0)
+    if rendered != n_nonzero:
+        print(f"\n  ❌ 完整性错误: 非零持仓 {n_nonzero} 个，面板只渲染 {rendered} 行 —— 有持仓被丢弃!")
+    if closed:
+        print(f"\n  📦 已清仓（0 股，不计入）: "
+              + ", ".join(c["ticker"] for c in closed))
 
     # ── 总览 ──────────────────────────────────────────────
     total_pnl = total_value - total_cost

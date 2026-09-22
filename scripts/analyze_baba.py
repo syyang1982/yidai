@@ -5,7 +5,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.data.fetcher import EastmoneyFetcher
 from src.data.store import YidaiStore
 from src.analysis import profitability, health, cashflow, valuation, growth
-from src.data.models import _compute_grade, _compute_signal
+from src.data.models import (
+    _compute_grade, _compute_signal, normalize_total, DIMENSIONS_EXCEPT_DIVIDEND,
+)
 from src.knowledge.base import KnowledgeBase
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "db", "yidai.duckdb")
@@ -80,8 +82,17 @@ scores = {
     "growth": g["score"], "ownership": 4, "strategy": 4,
 }
 total = sum(scores.values())
-grade = _compute_grade(total)
-sig = _compute_signal(total, *scores.values())
+# W7.10：本脚本只评 7 个维度（不含 D6 分红），raw 满分是 35；
+# 但分档/信号阈值是按 8 维 40 分制校准的，必须先归一化再定档。
+# 另注：_compute_signal 要 8 个维度参数，dividend 位置补 0（本脚本不评它）。
+norm_total = normalize_total(total, DIMENSIONS_EXCEPT_DIVIDEND)
+grade = _compute_grade(norm_total)
+sig = _compute_signal(
+    norm_total,
+    scores["profitability"], scores["health"], scores["cashflow"],
+    scores["valuation"], scores["growth"], 0,
+    scores["ownership"], scores["strategy"],
+)
 
 # 打印
 dim_names = {"profitability": "盈利能力", "health": "财务健康", "cashflow": "现金流",
@@ -94,7 +105,7 @@ for dim, name_cn in dim_names.items():
     print(f"  {name_cn:　<6} [{bar}] {s}/5")
 
 emoji = {"BUY": "🟢", "HOLD": "🟡", "WATCH": "🔵", "REDUCE": "🔴"}.get(sig, "❓")
-print(f"\n  总分: {total}/35  等级: {grade}  信号: {emoji} {sig}")
+print(f"\n  总分: {total}/35（实评 7/8 维，等级/信号按归一 40 分制定）  等级: {grade}  信号: {emoji} {sig}")
 
 gross_margin = (latest.get("gross_profit", 0) or 0) / denom
 net_margin = (ni or 0) / denom

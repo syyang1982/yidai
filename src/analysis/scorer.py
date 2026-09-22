@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Dict, List, Optional
 
-from src.data.models import ScoreResult
+from src.data.models import ScoreResult, DIMENSIONS_EXCEPT_DIVIDEND
 from src.analysis import profitability, health, cashflow, valuation, growth, dividend_quality
 from src.analysis.benchmarks import get_benchmark
 from src.analysis.insider_activity import check_insider_activity
@@ -412,6 +412,12 @@ def score_all(
         dividend_score=div_result["score"],
         ownership_score=ownership_score,
         strategy_score=strategy_score,
+        # W7.10 实评维度归一化：D6 无分红数据时不算实评，不计入分母，
+        # 免得不发股息的成长股白丢满分、结构性够不到 A / BUY。
+        scored_dimensions=(
+            DIMENSIONS_EXCEPT_DIVIDEND if not div_result.get("has_data", True)
+            else None
+        ),
         qualitative_confirmed=qualitative_confirmed,
         data_complete=data_complete,
         missing_fields=missing_fields,

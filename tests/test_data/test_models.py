@@ -1,12 +1,17 @@
 """Tests for YiDAI data models."""
 
 from datetime import date
+
+import pytest
+
 from src.data.models import (
+    DIMENSION_KEYS,
     Company,
     FinancialStatement,
     PriceData,
     QualitativeAssessment,
     ScoreResult,
+    normalize_total,
 )
 
 
@@ -193,7 +198,9 @@ class TestScoreResultAutoComputation:
             strategy_score=5,
         )
         assert sr.total_score == 31
-        assert sr.grade == "A"
+        # /40 分档（2026-08-29「统一 40 分制」）：A 需 >=33，故 31 是 B。
+        # dividend_score 缺省 0，所以 7 维输入的满分是 35 而非 40。
+        assert sr.grade == "B"
         assert sr.signal == "REDUCE"
 
     def test_cashflow_score_one_triggers_reduce(self):
@@ -256,20 +263,65 @@ class TestScoreResultAutoComputation:
         assert sr.signal == "REDUCE"
 
     def test_grade_boundary_b(self):
-        """total=22 should be grade='B'."""
-        sr = ScoreResult(
+        """Pin the B/C boundary.
+
+        2026-08-29「统一 40 分制」把分档从 /35 迁到 /40：
+        A>=33, B>=26, C>=17, D>=9。所以 B 的下界是 26（旧断言写的是 /35 时代的 22）。
+        dividend_score 缺省 0，7 维输入满分 35。
+        """
+        base = dict(
             ticker="TEST",
             date=date(2024, 1, 1),
-            profitability_score=3,
-            health_score=3,
-            cashflow_score=3,
-            valuation_score=3,
+            profitability_score=4,
+            health_score=4,
+            cashflow_score=4,
+            valuation_score=4,
             growth_score=3,
             ownership_score=4,
             strategy_score=3,
         )
-        assert sr.total_score == 22
+        sr = ScoreResult(**base)                       # total=26 -> B
+        assert sr.total_score == 26
         assert sr.grade == "B"
+
+        sr2 = ScoreResult(**{**base, "ownership_score": 3})   # total=25 -> C
+        assert sr2.total_score == 25
+        assert sr2.grade == "C"
+
+    def test_normalize_total_by_scored_dimensions(self):
+        """W7.10 实评维度归一化：没评满 8 维的公司不该被满分 35 卡死档位。"""
+        dims7 = ("profitability", "health", "cashflow", "valuation",
+                 "growth", "ownership", "strategy")
+
+        # 7 维拿满 35 分 → 归一 40 分制 → 等价满分
+        assert normalize_total(35, dims7) == 40.0
+        # 全维度实评时零行为变化（既有全量评分不受影响）
+        assert normalize_total(29, None) == 29.0
+        assert normalize_total(29, DIMENSION_KEYS) == 29.0
+
+        # 无分红公司 raw 29/35 → 归一 33.14 → 够到 A 线(33)，不再被结构性压制
+        sr = ScoreResult(
+            ticker="TEST", date=date(2024, 1, 1),
+            profitability_score=5, health_score=5, cashflow_score=5,
+            valuation_score=4, growth_score=5, ownership_score=3,
+            strategy_score=2,
+            scored_dimensions=dims7,
+        )
+        assert sr.total_score == 29
+        assert sr.scored_count == 7
+        assert sr.normalized_total == pytest.approx(29 * 40 / 35)
+        assert sr.grade == "A"
+
+        # 对照：同样 8 维全评时 29 分只是 B
+        sr8 = ScoreResult(
+            ticker="TEST", date=date(2024, 1, 1),
+            profitability_score=5, health_score=5, cashflow_score=5,
+            valuation_score=4, growth_score=5, dividend_score=0,
+            ownership_score=3, strategy_score=2,
+        )
+        assert sr8.total_score == 29
+        assert sr8.scored_count == 8
+        assert sr8.grade == "B"
 
     def test_grade_boundary_d(self):
         """total=14 with all >= 2 => grade='D', signal='REDUCE' (total <= 14)."""

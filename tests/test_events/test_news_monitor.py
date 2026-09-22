@@ -115,16 +115,20 @@ class TestGenerateReport:
         assert '🔴' in report
 
     def test_calendar_format(self):
+        # 事件日期相对「今天」生成，避免测试随时间腐烂
+        # （旧断言写死 '2026-07-20' + 30 天窗口，过期后日历必然为空）。
+        from datetime import date, timedelta   # 局部导入：避免改动文件头
+        ev_date = str(date.today() + timedelta(days=10))
         events = [
             MarketEvent(
                 event_id='c1', event_type='earnings', title='财报日',
-                description='desc', event_date='2026-07-20', event_time='',
+                description='desc', event_date=ev_date, event_time='',
                 affected_tickers=['LX'], impact_level='medium',
             ),
         ]
         cal = self.analyzer.generate_upcoming_calendar(events, days=30)
         assert '事件日历' in cal
-        assert '2026-07' in cal
+        assert ev_date[:7] in cal
         assert '财报日' in cal
 
 
