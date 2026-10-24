@@ -46,6 +46,19 @@ CREATE TABLE IF NOT EXISTS leading_indicators (
 )
 """
 
+_CREATE_HISTORY = """
+CREATE TABLE IF NOT EXISTS indicator_history (
+    ticker VARCHAR NOT NULL,
+    indicator_name VARCHAR NOT NULL,
+    period VARCHAR NOT NULL,
+    value DOUBLE,
+    status VARCHAR,
+    recorded_date DATE,
+    recorded_at VARCHAR,
+    PRIMARY KEY (ticker, indicator_name, period)
+)
+"""
+
 _COLUMNS = [
     "ticker", "company_name", "indicator_name", "description", "source",
     "threshold_positive", "threshold_negative", "unit", "category",
@@ -113,8 +126,9 @@ class LeadingIndicatorStore:
         self._create_tables()
 
     def _create_tables(self):
-        """Create leading_indicators table if it does not exist."""
+        """Create leading_indicators / indicator_history tables if they don't exist."""
         self.conn.execute(_CREATE_TABLE)
+        self.conn.execute(_CREATE_HISTORY)
         # Migration: add dimension_map column to existing tables
         try:
             self.conn.execute(
@@ -122,6 +136,112 @@ class LeadingIndicatorStore:
             )
         except Exception:
             pass  # column already exists
+
+    def record_history(
+        self,
+        ticker: str,
+        indicator_name: str,
+        period: str,
+        value: float,
+        status: Optional[str] = None,
+    ) -> None:
+        """按期写入指标历史值。同一期重复写入则覆盖（幂等）。
+
+        「连续N期」判定必须靠这张表——leading_indicators 只存最新值。
+        """
+        row = self.conn.execute(
+            "SELECT threshold_positive, threshold_negative FROM leading_indicators "
+            "WHERE ticker = ? AND indicator_name = ?",
+            [ticker, indicator_name],
+        ).fetchone()
+        if row is None:
+            raise ValueError(
+                f"Indicator '{indicator_name}' for ticker '{ticker}' not found. "
+                "Call add_indicator() first."
+            )
+        if status is None:
+            status = _calculate_status(value, row[0], row[1])
+        now_date = date.today().isoformat()
+        now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.conn.execute(
+            """
+            INSERT INTO indicator_history
+                (ticker, indicator_name, period, value, status, recorded_date, recorded_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (ticker, indicator_name, period) DO UPDATE SET
+                value = excluded.value,
+                status = excluded.status,
+                recorded_date = excluded.recorded_date,
+                recorded_at = excluded.recorded_at
+            """,
+            [ticker, indicator_name, period, float(value), status, now_date, now_ts],
+        )
+
+    def get_history(
+        self,
+        ticker: str,
+        indicator_name: str,
+        limit: int = 12,
+    ) -> list[dict]:
+        """按期倒序取历史值（最新在前）。"""
+        rows = self.conn.execute(
+            "SELECT period, value, status, recorded_date FROM indicator_history "
+            "WHERE ticker = ? AND indicator_name = ? "
+            "ORDER BY period DESC LIMIT ?",
+            [ticker, indicator_name, limit],
+        ).fetchall()
+        return [
+            {"period": r[0], "value": r[1], "status": r[2], "recorded_date": r[3]}
+            for r in rows
+        ]
+
+    def consecutive_periods_negative(
+        self,
+        ticker: str,
+        indicator_name: str,
+        limit: int = 4,
+    ) -> int:
+        """从最新一期往前，连续为 negative 的期数。用于「连续两季下滑」判定。"""
+        hist = self.get_history(ticker, indicator_name, limit=limit)
+        n = 0
+        for h in hist:
+            if h["status"] == "negative":
+                n += 1
+            else:
+                break
+        return n
+
+    def consecutive_periods_trending(
+        self,
+        ticker: str,
+        indicator_name: str,
+        direction: str,
+        limit: int = 6,
+    ) -> int:
+        """从最新一期往前，连续朝 direction 方向变化的期数。
+
+        direction="up"   数值连续上升的期数（如不良率 3.0→3.1→3.5→3.6 = 3）
+        direction="down" 数值连续下降的期数
+
+        用于「不良率连续两季上升」「定点数连续两季净减少」这类趋势条件——
+        水平判定会漏掉它们：值还没到极端区间，但方向已经连续偏坏。
+        等值（持平）不计入也不打断，避免小数抖动误判。
+        """
+        hist = self.get_history(ticker, indicator_name, limit=limit)
+        vals = [h["value"] for h in hist if h.get("value") is not None]
+        n = 0
+        for prev, cur in zip(vals, vals[1:]):   # hist 是倒序（新→旧），所以 prev 更新
+            if direction == "up":
+                if cur < prev:
+                    n += 1
+                elif cur > prev:
+                    break
+            else:  # down
+                if cur > prev:
+                    n += 1
+                elif cur < prev:
+                    break
+        return n
 
     def add_indicator(
         self,
@@ -244,6 +364,8 @@ class LeadingIndicatorStore:
             """,
             [value, period, now_date, status, now_ts, ticker, indicator_name],
         )
+        # 同步写历史，否则「连续两季」判定无从做起（幂等，同周期覆盖）
+        self.record_history(ticker, indicator_name, period, value, status)
 
         # Return updated record
         row = self.conn.execute(

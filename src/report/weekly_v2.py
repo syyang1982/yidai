@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -49,6 +50,175 @@ try:
     from src.strategy.decision import DecisionLog
 except ImportError:  # pragma: no cover
     DecisionLog = None  # type: ignore
+
+
+# ---------------------------------------------------------------------------
+# signal_records 兜底：score_result 表自 2026-05 起没有新行
+# ---------------------------------------------------------------------------
+#
+# 周报原本只读 yidai.duckdb 的 score_result/price_data，但生产链路里
+# 没有任何代码调用 store.upsert_score() —— 该表 2026-05-26 之后就停了，
+# 结果 65 家公司里 64 家显示「暂无评分数据」，信号汇总恒为「买入 1」。
+# 真正每周更新的评分在 signals.duckdb 的 signal_records（record_all_signals
+# 写入），这里把它作为首选数据源，score_result 退回兜底。
+
+#: signal_records.dimension_scores 的中文键 → 渲染层的维度键
+_SIGNAL_DIM_KEYS = {
+    "盈利": "profitability_score",
+    "健康": "health_score",
+    "现金流": "cashflow_score",
+    "估值": "valuation_score",
+    "成长": "growth_score",
+    "股东": "ownership_score",
+    "战略": "strategy_score",
+}
+
+
+def _norm_signal_ticker(ticker: str) -> str:
+    """去掉市场后缀与前导零，用于补零/未补零两套 ticker 的归一匹配。"""
+    t = (ticker or "").upper().strip()
+    for suf in (".HK", ".SH", ".SZ", ".AX", ".ASX"):
+        if t.endswith(suf):
+            t = t[: -len(suf)]
+            break
+    return t.lstrip("0") or t
+
+
+def _load_signal_scores(tracker) -> Dict[str, Dict[str, List[dict]]]:
+    """把 signal_records 读成周报评分结构，按 ticker 建两级索引（精确/归一）。
+
+    返回 {"exact": {TICKER: [score, ...]}, "norm": {...}}，每个列表按日期升序，
+    最后一条即最新评分。
+    """
+    rows = tracker.conn.execute(
+        """SELECT ticker, signal_date, signal_type, total_score, grade,
+                  dimension_scores, company_state
+           FROM signal_records
+           WHERE total_score > 0 AND signal_type IN ('BUY', 'HOLD', 'WATCH', 'REDUCE')
+           ORDER BY signal_date, created_at"""
+    ).fetchall()
+
+    by_exact: Dict[str, List[dict]] = {}
+    by_norm: Dict[str, List[dict]] = {}
+    for ticker, sdate, stype, total, grade, dims_json, state_json in rows:
+        try:
+            dims = json.loads(dims_json) if dims_json else {}
+        except (TypeError, ValueError):
+            dims = {}
+        try:
+            state = json.loads(state_json) if state_json else {}
+        except (TypeError, ValueError):
+            state = {}
+
+        if isinstance(sdate, date):
+            row_date = sdate
+        else:
+            try:
+                row_date = date.fromisoformat(str(sdate)[:10])
+            except ValueError:
+                continue
+
+        raw_total = float(total or 0)
+        dim_sum = 0
+        dim_scores = {}
+        for cn_key, dim_key in _SIGNAL_DIM_KEYS.items():
+            val = dims.get(cn_key, 0) or 0
+            dim_scores[dim_key] = val
+            dim_sum += val
+
+        score = {
+            "ticker": ticker,
+            "date": row_date,
+            "signal": stype,
+            "total_score": _display_total(raw_total, grade, dim_sum),
+            "_scale": _display_scale(raw_total, grade, dim_sum),
+            "grade": grade,
+            "_raw_total": raw_total,
+            "_state": state,
+        }
+        score.update(dim_scores)
+
+        by_exact.setdefault(str(ticker).upper(), []).append(score)
+        by_norm.setdefault(_norm_signal_ticker(ticker), []).append(score)
+
+    return {"exact": by_exact, "norm": by_norm}
+
+
+def _pick_signal_rows(index: Optional[Dict[str, Dict[str, List[dict]]]],
+                      ticker: str) -> List[dict]:
+    """取该 ticker 的评分记录：先精确匹配，再退回归一匹配。"""
+    if not index:
+        return []
+    rows = index.get("exact", {}).get(str(ticker).upper())
+    if rows:
+        return rows
+    return index.get("norm", {}).get(_norm_signal_ticker(ticker), [])
+
+
+def _price_from_signal(score: dict) -> Optional[dict]:
+    """从 signal_records.company_state 还原价格块（record_all_signals 当日拉取）。"""
+    state = score.get("_state") or {}
+    price = state.get("price")
+    if not price:
+        return None
+    return {
+        "close_price": price,
+        "pe_ratio": state.get("pe"),
+        "pb_ratio": state.get("pb"),
+        "market_cap": None,
+        "date": score.get("date"),
+    }
+
+
+def _display_scale(raw: float, grade: Optional[str],
+                   dim_sum: Optional[int] = None) -> str:
+    """判定该条记录的 raw 总分属于哪种满分口径：'raw'(8维40分制) / 'scaled'(7维)。
+
+    signal_records.total_score 是 score_all 的 raw 分，但它有两种满分：
+    有分红数据的公司评 8 维（满分 40，raw 本身就是 40 分制），没有的评 7 维
+    （满分 35，分档用的是归一分 raw*40/35）。记录里没存维数标记，所以用两条
+    证据判定，保证「总分 + 评级」永远自洽：
+      1. 七维和 < raw → 分红维计入了 → 按 8 维 40 分制直接显示 raw；
+      2. 拿 raw 与 raw*40/35 分别回算档位，取与记录评级一致的那个。
+    """
+    if grade:
+        scaled = int(raw * 40 / 35 // 1)
+        g_raw = _compute_grade_from_total(int(raw))
+        g_scaled = _compute_grade_from_total(scaled)
+        if g_scaled == grade and g_raw != grade:
+            return "scaled"
+        if g_raw == grade and g_scaled != grade:
+            return "raw"
+    if dim_sum is not None and raw > dim_sum:
+        return "raw"
+    return "scaled"
+
+
+def _display_total(raw: float, grade: Optional[str],
+                   dim_sum: Optional[int] = None) -> int:
+    """周报展示用的总分（统一 40 分制），口径判定见 _display_scale。"""
+    if _display_scale(raw, grade, dim_sum) == "raw":
+        return int(raw)
+    return int(raw * 40 / 35 // 1)
+
+
+def _scale_to_40(rows: List[dict]) -> List[dict]:
+    """把 signal_records 的 raw 总分换算成 40 分制展示（无七维和时用评级判定）。"""
+    if not rows:
+        return rows
+    scaled_rows: List[dict] = []
+    for row in rows:
+        row = dict(row)
+        try:
+            raw = float(row.get("total_score") or 0)
+        except (TypeError, ValueError):
+            raw = 0.0
+        if raw > 0:
+            grade = row.get("grade")
+            row["_scale"] = _display_scale(raw, grade)
+            row["total_score"] = _display_total(raw, grade)
+        scaled_rows.append(row)
+    return scaled_rows
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +296,7 @@ def _render_signal_alerts(
                 f"| {sig.get('company_name', '')} "
                 f"| {sig.get('signal_date', '')} "
                 f"| {emoji}{cn} "
-                f"| {sig.get('total_score', '')}/35 |"
+                f"| {sig.get('total_score', '')}/40 |"
             )
         lines.append("")
 
@@ -144,7 +314,7 @@ def _render_signal_alerts(
                 f"| {sig.get('company_name', '')} "
                 f"| {sig.get('signal_date', '')} "
                 f"| {emoji}{cn} "
-                f"| {sig.get('total_score', '')}/35 |"
+                f"| {sig.get('total_score', '')}/40 |"
             )
         lines.append("")
 
@@ -726,6 +896,15 @@ def generate_report_v2(
         except Exception:
             pass
 
+    # 评分数据源：signal_records（record_all_signals 每周写入）优先，
+    # score_result 自 2026-05 起停更，仅作兜底
+    signal_score_index: Dict[str, Dict[str, List[dict]]] = {}
+    if signal_tracker is not None:
+        try:
+            signal_score_index = _load_signal_scores(signal_tracker)
+        except Exception:
+            signal_score_index = {}
+
     # Gather data
     tickers = store.get_all_tickers()
     all_scores: List[dict] = []
@@ -746,9 +925,9 @@ def generate_report_v2(
     pending_12m: List[dict] = []
     if signal_tracker is not None:
         try:
-            new_signals = signal_tracker.get_signal_history()[-5:]  # last 5 as "new"
-            pending_6m = signal_tracker.get_pending_reviews("6m", min_days_old=180)
-            pending_12m = signal_tracker.get_pending_reviews("12m", min_days_old=365)
+            new_signals = _scale_to_40(signal_tracker.get_signal_history()[-5:])  # last 5 as "new"
+            pending_6m = _scale_to_40(signal_tracker.get_pending_reviews("6m", min_days_old=180))
+            pending_12m = _scale_to_40(signal_tracker.get_pending_reviews("12m", min_days_old=365))
         except Exception:
             pass
 
@@ -761,6 +940,11 @@ def generate_report_v2(
         price_data = store.get_latest_price(ticker)
         scores = store.get_scores(ticker)
 
+        # signal_records 是每周跑出来的活数据，优先于停更的 score_result
+        sig_rows = _pick_signal_rows(signal_score_index, ticker)
+        if sig_rows:
+            scores = sig_rows
+
         if not scores:
             company_sections.append(
                 f"## {company.get('name', ticker)} ({ticker})\n\n"
@@ -769,7 +953,12 @@ def generate_report_v2(
             continue
 
         latest_score = scores[-1]
-        prev_score = _get_prev_score(store, ticker, latest_score["date"])
+        if sig_rows:
+            # 上一条 signal_records 记录就是上周同口径的评分
+            prev_score = scores[-2] if len(scores) >= 2 else None
+            price_data = _price_from_signal(latest_score) or price_data
+        else:
+            prev_score = _get_prev_score(store, ticker, latest_score["date"])
 
         all_scores.append(latest_score)
 

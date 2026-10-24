@@ -75,7 +75,9 @@ class NewsMonitor:
 
     def _search_rss(self, query: str, hours: int = 24) -> List[dict]:
         """Fetch & parse Google News RSS, returning articles within *hours* window."""
-        url = self.GOOGLE_NEWS_RSS.format(query=query.replace(' ', '+'))
+        # 中文查询必须做URL编码, 否则 Google News 返回 HTTP 400, 扫描会静默漏报
+        from urllib.parse import quote
+        url = self.GOOGLE_NEWS_RSS.format(query=quote(query))
         try:
             result = subprocess.run(
                 ['curl', '-sL', '--max-time', '15', url],

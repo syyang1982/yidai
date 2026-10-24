@@ -67,8 +67,12 @@ class LoopReport:
 
 
 def _norm_ticker(t: str) -> str:
-    """归一 ticker：大写 + 去掉 HK 代码前导 0（01810.HK / 1810.HK / 1810 是同一个）。"""
-    s = str(t or "").strip().upper().replace(".HK", "")
+    """归一 ticker：大写 + 去掉 HK 代码前导 0（01810.HK / 1810.HK / 1810 是同一个），
+    并统一 ASX 后缀（SGP.ASX / SGP.AX 是同一只）。"""
+    s = str(t or "").strip().upper()
+    if s.endswith(".ASX"):
+        s = s[:-4] + ".AX"
+    s = s.replace(".HK", "")
     s = s.lstrip("0") or s
     return s
 

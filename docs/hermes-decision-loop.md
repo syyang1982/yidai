@@ -97,6 +97,23 @@ BUY 需要同时满足：
 
 REDUCE 仍然优先：health < 2 或 cashflow < 2。审计结论不变：REDUCE 可用，BUY 只是研究名单。
 
+## 失效条件自动观测（2026-10-14 起）
+
+`python manage.py position watch` 现在走评估器，能判「连续N期」：
+
+- `src/strategy/invalidation_evaluator.py` — 读 `indicator_history` 做连续红期判定
+- `src/analysis/leading_indicators.py` — `update_value` 自动写历史；`consecutive_periods_negative()` 是判定入口
+- `scripts/collect_invalidation_indicators.py` — 自动采集（东财港股/美股财报 + Yahoo 行情），cron `91302eced8be` 每交易日 19:00 跑
+
+**规则不变**：单期红 ≠ 失效；写了「连续两季」的腿要连红够期数才触发；无数据的腿不得判失效。
+
+**诚实边界**：35 条腿里只有 10 条能自动采（财报可得）。SU7月交付、同店销售、DAU、
+版号、定点数、SGP.AX 全部 3 条等运营指标需人工或网络检索，仍显示 ❓。
+**❓ 不是 bug，是数据源边界——不要用空值判失效。**
+
+**已知缺口**：触发历史未落库。某条腿曾经触发后恢复（如 03888 在 2025 连续两季红），
+这类事件目前不会被记录，只能靠 cron 的状态文件 `db/invalidation_monitor_state.json` 兜底。
+
 ## 复盘四桶（关闭仓位时）
 
 不要只用价格 vs 预期：

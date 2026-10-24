@@ -117,6 +117,28 @@ def get_qualitative_scores(profile: dict) -> dict:
     return {"ownership_score": ownership, "strategy_score": strategy}
 
 
+def fetch_us_price_live(symbol: str):
+    """美股实时价（新浪 gb_ 前缀，GBK 编码，字段[1]=现价）。
+
+    eastmoney 不覆盖美股，乐信价格原先写死在 LX_PRICE 里（2.45），
+    2026-10-02 实际收盘 0.685 —— 硬编码价会让估值维度长期失真。
+    """
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["curl", "-s", "--max-time", "15",
+             "-H", "Referer: https://finance.sina.com.cn",
+             f"https://hq.sinajs.cn/list=gb_{symbol.lower()}"],
+            capture_output=True, timeout=20,
+        )
+        text = r.stdout.decode("gbk", errors="replace")
+        payload = text.split('"')[1]
+        price = float(payload.split(",")[1])
+        return price if price > 0 else None
+    except Exception:
+        return None
+
+
 def fetch_financials_with_fallback(fetcher, store, ticker):
     """Fetch financials from API, fall back to DuckDB cache if empty."""
     try:
@@ -174,7 +196,16 @@ def process_company(fetcher, store, kb, ticker, signal_date, tracker):
     if display_ticker == "LX" or ticker == "LX":
         fin = LX_FINANCIAL
         prev_fin = LX_PREV_FINANCIAL
-        price = LX_PRICE
+        price = dict(LX_PRICE)
+        # 财务仍是 FY2025 硬编码，但价格必须取实时值：
+        # LX_PRICE 的 2.45 是旧价，2026-10-02 实收 0.685
+        live_px = fetch_us_price_live("LX")
+        if live_px:
+            base_px = LX_PRICE.get("close_price") or live_px
+            price["close_price"] = live_px
+            if LX_PRICE.get("pe_ratio"):
+                price["pe_ratio"] = round(LX_PRICE["pe_ratio"] * live_px / base_px, 2)
+            price["date"] = date.today().isoformat()
         annual = [LX_PREV_FINANCIAL, LX_FINANCIAL]  # for growth calc
     else:
         # Fetch financials with cache fallback

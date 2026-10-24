@@ -74,8 +74,33 @@ class EventStore:
     def close(self):
         self.conn.close()
 
-    def add_event(self, event: MarketEvent) -> MarketEvent:
-        """Add an event, auto-generating event_id if empty. Returns the event."""
+    @staticmethod
+    def _dedup_key(event: MarketEvent) -> str:
+        """事件业务唯一键: 同 类型+标题+日期+来源 视为同一条事件。"""
+        return "||".join([
+            (event.event_type or "").strip(),
+            (event.title or "").strip(),
+            (event.event_date or "").strip(),
+            (event.source or "").strip(),
+        ])
+
+    def event_exists(self, event: MarketEvent) -> bool:
+        """按业务唯一键判断事件是否已存在。"""
+        row = self.conn.execute(
+            "SELECT 1 FROM market_events WHERE event_type = ? AND title = ? "
+            "AND event_date = ? AND coalesce(source,'') = ? LIMIT 1",
+            [event.event_type, event.title, event.event_date, event.source or ""],
+        ).fetchone()
+        return row is not None
+
+    def add_event(self, event: MarketEvent, dedup: bool = True) -> Optional[MarketEvent]:
+        """添加事件。dedup=True 时若同业务键已存在则跳过，返回 None。
+
+        这是 E1 重复写入的根因修复：--refresh 每次都调 add_event，
+        过去无条件 INSERT 导致 34 条事件被写入 41 份拷贝。
+        """
+        if dedup and self.event_exists(event):
+            return None
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if not event.event_id:
             event.event_id = str(uuid4())
@@ -87,6 +112,32 @@ class EventStore:
             _event_to_row(event),
         )
         return event
+
+    def add_events(self, events: List[MarketEvent], dedup: bool = True) -> List[MarketEvent]:
+        """批量添加，返回真正写入的事件。"""
+        inserted = []
+        for e in events:
+            if self.add_event(e, dedup=dedup) is not None:
+                inserted.append(e)
+        return inserted
+
+    def dedupe(self) -> int:
+        """清理历史重复行：按业务唯一键保留最新一条，删除其余。返回删除数。"""
+        before = self.conn.execute("SELECT count(*) FROM market_events").fetchone()
+        before_n = int(before[0]) if before else 0
+        self.conn.execute(
+            """
+            DELETE FROM market_events
+            WHERE event_id NOT IN (
+                SELECT arg_max(event_id, coalesce(updated_at,'') || '|' || coalesce(created_at,''))
+                FROM market_events
+                GROUP BY event_type, title, event_date, coalesce(source,'')
+            )
+            """
+        )
+        after = self.conn.execute("SELECT count(*) FROM market_events").fetchone()
+        after_n = int(after[0]) if after else 0
+        return max(0, before_n - after_n)
 
     def _query_events(self, where: str = "", params: list = None) -> List[MarketEvent]:
         sql = f"SELECT {', '.join(_COLUMNS)} FROM market_events"
@@ -121,8 +172,16 @@ class EventStore:
         today = datetime.now().strftime("%Y-%m-%d")
         return self._query_events("event_date = ?", [today])
 
-    def get_by_type(self, event_type: str) -> List[MarketEvent]:
-        return self._query_events("event_type = ?", [event_type])
+    def get_by_type(self, event_type: str, days: Optional[int] = None) -> List[MarketEvent]:
+        """按类型查询事件。days 给定时只返回未来 N 天内（E3 修复：manage.py 传了 days 参数）。"""
+        if days is None:
+            return self._query_events("event_type = ?", [event_type])
+        today = datetime.now().strftime("%Y-%m-%d")
+        end = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
+        return self._query_events(
+            "event_type = ? AND event_date >= ? AND event_date <= ?",
+            [event_type, today, end],
+        )
 
     def mark_notified(self, event_id: str) -> bool:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

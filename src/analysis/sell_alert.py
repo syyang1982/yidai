@@ -189,19 +189,25 @@ def check_stop_loss(
     """检查4: 止损触发。"""
     t = targets.get(ticker, {})
 
-    # 方式A: 硬止损 — 亏损 > 50%
-    if pnl < -0.50:
+    # 用户已为该标的设置明确止损位 (stop_loss 价格 / stop_loss_pct 百分比) → 以明确止损为准。
+    # 通用-50%硬止损只在该标的没有任何明确止损设置时兜底, 避免覆盖用户裁决
+    # (如 LX/速腾/名创 2026-09-13 否决价格止损, 但预设了更低位的灾难止损)。
+    stop_price = t.get("stop_loss") or t.get("stop_loss_price") or t.get("stop_price")
+    sl_pct = t.get("stop_loss_pct")
+    has_explicit_stop = bool(stop_price) or sl_pct is not None
+
+    # 方式A: 硬止损 — 亏损 > 50% (仅适用于未设置明确止损的标的)
+    if pnl < -0.50 and not has_explicit_stop:
         return SellAlert(
             ticker=ticker, name=name, severity="CRITICAL",
             trigger="hard_stop_loss",
             trigger_cn=f"亏损{pnl:.0%}, 超过50%硬止损线",
             current_price=price, cost_basis=cost, pnl_pct=pnl,
             suggested_action="立即止损清仓",
-            details=f"浮亏{pnl:.0%}已超过50%硬止损线",
+            details=f"浮亏{pnl:.0%}已超过50%硬止损线(该标的未设明确止损)",
         )
 
     # 方式B: 止损价触发
-    stop_price = t.get("stop_loss") or t.get("stop_loss_price") or t.get("stop_price")
     if stop_price and price <= stop_price:
         return SellAlert(
             ticker=ticker, name=name, severity="CRITICAL",

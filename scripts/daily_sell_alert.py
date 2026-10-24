@@ -39,28 +39,36 @@ def main():
         # 无重要提醒, 静默退出 (不输出 = 不推送)
         return
 
-    # Step 4: 输出提醒 (触发推送)
+    # Step 4: 输出提醒 — 按 report-format 规范（结论行动先行，正文≤300字）
+    from datetime import date as _date
     severity_icons = {"CRITICAL": "🔴", "WARNING": "🟡"}
-
-    print("⚠️ 意怠卖出提醒")
-    print()
-
-    for a in important:
-        icon = severity_icons.get(a.severity, "⚪")
-        print(f"{icon} [{a.severity}] {a.name} ({a.ticker})")
-        print(f"   触发: {a.trigger_cn}")
-        print(f"   当前价: {a.current_price}  成本: {a.cost_basis}  浮盈: {a.pnl_pct:+.1%}")
-        print(f"   建议: {a.suggested_action}")
-        if a.details:
-            print(f"   备注: {a.details}")
-        print()
 
     c_count = sum(1 for a in important if a.severity == "CRITICAL")
     w_count = sum(1 for a in important if a.severity == "WARNING")
-    print(f"共 {len(important)} 条提醒: 🔴{c_count} 🟡{w_count}")
+    # 最紧急的一条（CRITICAL 优先，其次浮亏最大）
+    top = max(important, key=lambda a: (a.severity == "CRITICAL", abs(a.pnl_pct)))
 
+    print(f"📌 意怠卖出提醒 — {_date.today().isoformat()}")
+    print()
+    print(f"【结论】{len(important)} 条待处理（🔴{c_count} 🟡{w_count}），"
+          f"最要紧：{top.name} {severity_icons.get(top.severity)}")
+    print()
+    print("【行动】")
+    for a in important:
+        print(f"- {severity_icons.get(a.severity, '⚪')} {a.name}：{a.suggested_action}")
+    print()
+    print("【依据】")
+    print("| 标的 | 级别 | 触发 | 现价 | 成本 | 浮盈 |")
+    for a in important:
+        lvl = "🔴CRIT" if a.severity == "CRITICAL" else "🟡WARN"
+        trig = (a.trigger_cn or "")[:14]
+        print(f"| {a.ticker} | {lvl} | {trig} | {a.current_price} | {a.cost_basis} | {a.pnl_pct:+.1%} |")
+    for a in important:
+        if a.details:
+            print(f"  · {a.name}：{a.details}")
     if c_count > 0:
-        print("⚠️ 有CRITICAL级提醒, 建议开盘后立即处理!")
+        print()
+        print(f"【风险】含 {c_count} 条 CRITICAL，建议开盘后立即处理。")
 
 
 if __name__ == "__main__":

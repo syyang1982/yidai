@@ -11,14 +11,19 @@ from typing import List, Dict, Optional
 
 # ---------------------------------------------------------------------------
 # 2026年下半年宏观事件（可手动更新）
+# FOMC 日期=决议公布日(两日会议第二天 14:00 ET)。官方日程核对于 2026-10-24:
+# federalreserve.gov/monetarypolicy/fomccalendars.htm（2026: 1/27-28, 3/17-18*, 4/28-29,
+# 6/16-17*, 7/28-29, 9/15-16*, 10/27-28, 12/8-9*，*=含点阵图/SEP）
+# CPI 发布日核对于 BLS: bls.gov/schedule/news_release/cpi.htm（10月CPI→11-10, 11月CPI→12-10）
+# 美国中期选举=选举日 2026-11-03（11月第一个周一后的周二）
 # ---------------------------------------------------------------------------
 
 MACRO_EVENTS_2026: List[Dict] = [
     # ===== 7月 =====
     {"date": "2026-07-15", "title": "中国Q2 GDP", "type": "macro", "impact": "high",
      "description": "二季度GDP增速，反映经济复苏力度"},
-    {"date": "2026-07-30", "title": "美联储FOMC利率决议", "type": "macro", "impact": "high",
-     "description": "关注降息信号和点阵图变化"},
+    {"date": "2026-07-29", "title": "美联储FOMC利率决议", "type": "macro", "impact": "high",
+     "description": "关注降息信号"},
 
     # ===== 8月 =====
     {"date": "2026-08-12", "title": "美国7月CPI", "type": "macro", "impact": "high",
@@ -31,7 +36,7 @@ MACRO_EVENTS_2026: List[Dict] = [
     # ===== 9月 =====
     {"date": "2026-09-10", "title": "美国8月CPI", "type": "macro", "impact": "high",
      "description": "通胀趋势确认"},
-    {"date": "2026-09-17", "title": "美联储FOMC利率决议+点阵图", "type": "macro", "impact": "high",
+    {"date": "2026-09-16", "title": "美联储FOMC利率决议+点阵图", "type": "macro", "impact": "high",
      "description": "三季度最重要会议，含经济预测和点阵图更新"},
     {"date": "2026-09-20", "title": "中国LPR报价", "type": "macro", "impact": "medium",
      "description": "贷款市场报价利率"},
@@ -41,34 +46,40 @@ MACRO_EVENTS_2026: List[Dict] = [
      "description": "港股通10月1-7日关闭，南向资金暂停"},
     {"date": "2026-10-15", "title": "中国Q3 GDP", "type": "macro", "impact": "high",
      "description": "三季度GDP增速"},
-    {"date": "2026-10-29", "title": "美联储FOMC利率决议", "type": "macro", "impact": "high",
+    {"date": "2026-10-28", "title": "美联储FOMC利率决议", "type": "macro", "impact": "high",
      "description": "利率决议"},
 
     # ===== 11月 =====
-    {"date": "2026-11-05", "title": "美国中期选举", "type": "macro", "impact": "high",
+    {"date": "2026-11-03", "title": "美国中期选举", "type": "macro", "impact": "high",
      "description": "国会选举，影响政策走向和市场情绪"},
-    {"date": "2026-11-12", "title": "美国10月CPI", "type": "macro", "impact": "high",
+    {"date": "2026-11-10", "title": "美国10月CPI", "type": "macro", "impact": "high",
      "description": "通胀数据"},
 
     # ===== 12月 =====
     {"date": "2026-12-10", "title": "美国11月CPI", "type": "macro", "impact": "high",
      "description": "通胀数据"},
-    {"date": "2026-12-17", "title": "美联储FOMC利率决议+点阵图", "type": "macro", "impact": "high",
+    {"date": "2026-12-09", "title": "美联储FOMC利率决议+点阵图", "type": "macro", "impact": "high",
      "description": "年度最后一次会议，含全年经济预测更新"},
 
     # ===== 澳洲RBA =====
-    {"date": "2026-07-08", "title": "澳洲RBA利率决议", "type": "macro", "impact": "medium",
+    # 官方2026日程: https://www.rba.gov.au/media-releases/2025/mr-25-02.html
+    # 日期=决议公布日(两日会议的第二天 14:30 AEST/AEDT)。2026年共8次会议，10月无会议。
+    {"date": "2026-02-03", "title": "澳洲RBA利率决议", "type": "macro", "impact": "medium",
      "description": "澳大利亚储备银行利率决议，影响SGP.ASX"},
-    {"date": "2026-08-05", "title": "澳洲RBA利率决议", "type": "macro", "impact": "medium",
-     "description": "澳大利亚储备银行利率决议"},
-    {"date": "2026-09-02", "title": "澳洲RBA利率决议", "type": "macro", "impact": "medium",
-     "description": "澳大利亚储备银行利率决议"},
-    {"date": "2026-10-07", "title": "澳洲RBA利率决议", "type": "macro", "impact": "medium",
-     "description": "澳大利亚储备银行利率决议"},
-    {"date": "2026-11-04", "title": "澳洲RBA利率决议", "type": "macro", "impact": "medium",
-     "description": "澳大利亚储备银行利率决议"},
-    {"date": "2026-12-02", "title": "澳洲RBA利率决议", "type": "macro", "impact": "medium",
-     "description": "澳大利亚储备银行利率决议"},
+    {"date": "2026-03-17", "title": "澳洲RBA利率决议", "type": "macro", "impact": "medium",
+     "description": "澳大利亚储备银行利率决议，影响SGP.ASX"},
+    {"date": "2026-05-05", "title": "澳洲RBA利率决议", "type": "macro", "impact": "medium",
+     "description": "澳大利亚储备银行利率决议，影响SGP.ASX"},
+    {"date": "2026-06-16", "title": "澳洲RBA利率决议", "type": "macro", "impact": "medium",
+     "description": "澳大利亚储备银行利率决议，影响SGP.ASX"},
+    {"date": "2026-08-11", "title": "澳洲RBA利率决议", "type": "macro", "impact": "medium",
+     "description": "澳大利亚储备银行利率决议，影响SGP.ASX"},
+    {"date": "2026-09-29", "title": "澳洲RBA利率决议", "type": "macro", "impact": "medium",
+     "description": "澳大利亚储备银行利率决议，影响SGP.ASX"},
+    {"date": "2026-11-03", "title": "澳洲RBA利率决议", "type": "macro", "impact": "medium",
+     "description": "澳大利亚储备银行利率决议，影响SGP.ASX"},
+    {"date": "2026-12-08", "title": "澳洲RBA利率决议", "type": "macro", "impact": "medium",
+     "description": "澳大利亚储备银行利率决议，影响SGP.ASX"},
 ]
 
 

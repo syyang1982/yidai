@@ -71,8 +71,15 @@ class DecisionRecord:
     actual_price_6m: float = 0.0
     actual_price_12m: float = 0.0
     actual_return_pct: float = 0.0   # 实际收益率
-    review_notes: str = ""           # 复盘笔记
-    lessons: str = ""                # 经验教训
+    review_notes: str = ""           # 复盘笔记（**用户本人**写的）
+    lessons: str = ""                # 经验教训（**用户本人**写的）
+
+    # 归属分离（2026-10-14 加）
+    # 背景：此前 agent 写的复盘文本混进了 review_notes/lessons，与用户真实决策矛盾，
+    # 导致认知偏差检测读到的是 agent 的话而不是用户的决策。
+    # 规则：author 标明决策归属；agent 的分析只能进 agent_review，不得写入用户字段。
+    author: str = "user"             # "user" = 用户本人决策；"agent" = agent 代录/建议
+    agent_review: str = ""           # agent 的分析与建议（与用户记录严格分开）
 
     # 认知偏差追踪（用于复盘时识别决策偏见）
     confidence_level: int = 0     # 决策时信心水平 1-5（1=非常不确定, 5=非常确定）
@@ -138,6 +145,8 @@ class DecisionLog:
                 actual_return_pct DOUBLE,
                 review_notes VARCHAR,
                 lessons VARCHAR,
+                author VARCHAR,
+                agent_review VARCHAR,
                 confidence_level INTEGER,
                 counter_argument VARCHAR,
                 regret_flag BOOLEAN,
@@ -164,6 +173,7 @@ class DecisionLog:
                 ("confidence_level", "INTEGER"), ("counter_argument", "VARCHAR"),
                 ("regret_flag", "BOOLEAN"), ("market_regime", "VARCHAR"),
                 ("position_id", "VARCHAR"),
+                ("author", "VARCHAR"), ("agent_review", "VARCHAR"),
             ]:
                 if col not in existing_cols:
                     try:
@@ -267,13 +277,14 @@ class DecisionLog:
                 expected_price_6m, expected_price_12m, expected_reasoning,
                 actual_price_1w, actual_price_1m,
                 actual_price_6m, actual_price_12m, actual_return_pct,
-                review_notes, lessons, confidence_level, counter_argument,
+                review_notes, lessons, author, agent_review,
+                confidence_level, counter_argument,
                 regret_flag, market_regime, decision_date, status,
                 created_at, updated_at, position_id
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             [
@@ -288,7 +299,7 @@ class DecisionLog:
                 rec.expected_price_6m, rec.expected_price_12m, rec.expected_reasoning,
                 rec.actual_price_1w, rec.actual_price_1m,
                 rec.actual_price_6m, rec.actual_price_12m, rec.actual_return_pct,
-                rec.review_notes, rec.lessons,
+                rec.review_notes, rec.lessons, rec.author, rec.agent_review,
                 rec.confidence_level, rec.counter_argument,
                 rec.regret_flag, rec.market_regime,
                 rec.decision_date, rec.status,

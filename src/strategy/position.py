@@ -30,6 +30,62 @@ def default_decision_db() -> str:
     )
 
 
+# ── 币种换算：持仓成本一律折算为持仓币种（港股=港币） ────────────────
+# 口径来自 portfolio_config.DEFAULT_RATES，语义是「1 HKD 折多少该币种」，
+# 所以 本币 → HKD 是除法。
+try:
+    from .portfolio_config import DEFAULT_RATES as _RATES
+except Exception:  # pragma: no cover - 兜底，避免导入环
+    _RATES = {"CNY_PER_HKD": 0.872489, "USD_PER_HKD": 0.1282, "AUD_PER_HKD": 0.17936}
+
+
+def to_hkd(amount: float, currency: str) -> float:
+    """任意币种 → HKD。未知/缺失币种按原值返回（不猜汇率）。"""
+    if not currency or currency == "HKD":
+        return float(amount)
+    rate = _RATES.get(f"{currency}_PER_HKD")
+    if not rate:
+        return float(amount)
+    return float(amount) / rate
+
+
+def from_hkd(amount: float, currency: str) -> float:
+    """HKD → 任意币种。"""
+    if not currency or currency == "HKD":
+        return float(amount)
+    rate = _RATES.get(f"{currency}_PER_HKD")
+    if not rate:
+        return float(amount)
+    return float(amount) * rate
+
+
+def _norm_ticker(ticker: str) -> str:
+    """对账/重放时的代码规范化：.ASX→.AX、去前导零、大写。"""
+    t = (ticker or "").upper()
+    if t.endswith(".ASX"):
+        t = t[:-4] + ".AX"
+    if "." in t:
+        head, tail = t.split(".", 1)
+        return head.lstrip("0") + "." + tail
+    return t.lstrip("0")
+
+
+def currency_for_ticker(ticker: str) -> str:
+    """按市场推断持仓记账币种。口径：港股一律港币、A股人民币、ASX 澳元、美股美元。
+
+    推断不出返回 ""（由调用方回退到成交币种）。"""
+    t = (ticker or "").upper()
+    if t.endswith(".HK"):
+        return "HKD"
+    if t.endswith((".SH", ".SZ", ".BJ")):
+        return "CNY"
+    if t.endswith((".AX", ".ASX")):
+        return "AUD"
+    if "." not in t:
+        return "USD"
+    return ""
+
+
 @dataclass
 class Lot:
     """One fill attached to a position."""
@@ -39,6 +95,7 @@ class Lot:
     action: str = ""
     shares: int = 0
     price: float = 0.0
+    currency: str = ""          # 成交币种；"" 视为与持仓币种相同
 
 
 @dataclass
@@ -62,6 +119,8 @@ class Position:
     opened_at: str = ""
     closed_at: str = ""
     close_reason: str = ""
+    reconciled_at: str = ""      # 非空 = 已按权威口径（券商/json）对账，rebuild 跳过
+    reconciled_note: str = ""
     created_at: str = ""
     updated_at: str = ""
 
@@ -104,10 +163,19 @@ class PositionBook:
                 opened_at VARCHAR,
                 closed_at VARCHAR,
                 close_reason VARCHAR,
+                reconciled_at VARCHAR,
+                reconciled_note VARCHAR,
                 created_at TIMESTAMP,
                 updated_at TIMESTAMP
             )
         """)
+        # 老库补列（幂等）
+        existing = {r[1] for r in self.conn.execute(
+            "PRAGMA table_info(positions)"
+        ).fetchall()}
+        for col in ("reconciled_at", "reconciled_note"):
+            if col not in existing:
+                self.conn.execute(f"ALTER TABLE positions ADD COLUMN {col} VARCHAR")
 
     def get(self, position_id: str) -> Optional[Position]:
         row = self.conn.execute(
@@ -167,18 +235,54 @@ class PositionBook:
                 position_id, ticker, company_name, market, status, book,
                 thesis, invalidation, horizon, max_size_pct, currency,
                 shares, avg_cost, lots, opened_at, closed_at, close_reason,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                reconciled_at, reconciled_note, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 pos.position_id, pos.ticker, pos.company_name, pos.market,
                 pos.status, pos.book, pos.thesis, pos.invalidation, pos.horizon,
                 pos.max_size_pct, pos.currency, pos.shares, pos.avg_cost,
                 lots_json, pos.opened_at, pos.closed_at, pos.close_reason,
-                pos.created_at, pos.updated_at,
+                pos.reconciled_at, pos.reconciled_note, pos.created_at, pos.updated_at,
             ],
         )
         return pos
+
+    @staticmethod
+    def _lot_already_applied(pos, rec, action: str) -> bool:
+        """该决策是否已入账（让 position rebuild 幂等，不重复累加 lot）。
+
+        有 decision_id 时按 id 精确匹配；旧数据缺 id 时退回按
+        日期+方向+股数+价格 匹配。"""
+        did = getattr(rec, "decision_id", "") or ""
+        rdate = str(getattr(rec, "decision_date", "") or "")[:10]
+        rshares = int(getattr(rec, "shares", 0) or 0)
+        rprice = float(getattr(rec, "price", 0) or 0)
+        for lot in pos.lots:
+            if did and lot.decision_id:
+                if lot.decision_id == did and lot.action == action:
+                    return True
+                continue
+            if (
+                str(lot.date)[:10] == rdate
+                and lot.action == action
+                and lot.shares == rshares
+                and abs(lot.price - rprice) < 1e-9
+            ):
+                return True
+        return False
+
+    def _find_replayed(self, rec, action: str):
+        """在该 ticker 的所有持仓（含已平仓）里找已包含此决策的那条。"""
+        rows = self.conn.execute(
+            "SELECT * FROM positions WHERE ticker = ?",
+            [getattr(rec, "ticker", "") or ""],
+        ).fetchall()
+        for row in rows:
+            pos = self._row_to_position(row)
+            if self._lot_already_applied(pos, rec, action):
+                return pos
+        return None
 
     def apply_fill(
         self,
@@ -205,6 +309,17 @@ class PositionBook:
             pos = self.get_open(ticker)
             opened_new = False
             if pos is None:
+                # rebuild 重放已平仓持仓的买入时，复用原记录，避免每次 rebuild 都新增一条
+                prior = self._find_replayed(rec, action)
+                if prior is not None:
+                    rec.position_id = prior.position_id
+                    return {
+                        "position": prior,
+                        "warnings": warnings,
+                        "violations": violations,
+                        "accepted": True,
+                    }
+            if pos is None:
                 opened_new = True
                 pos = Position(
                     ticker=ticker,
@@ -215,7 +330,7 @@ class PositionBook:
                     invalidation=(invalidation or "").strip() or "待补全",
                     horizon=horizon or ("1m" if (book or "compound") == "tactical" else "12m"),
                     max_size_pct=max_size_pct or getattr(rec, "portfolio_pct", 0) or 0,
-                    currency=getattr(rec, "currency", "") or "HKD",
+                    currency=currency_for_ticker(ticker) or getattr(rec, "currency", "") or "HKD",
                     opened_at=now,
                 )
             else:
@@ -242,12 +357,23 @@ class PositionBook:
                     "accepted": False,
                 }
 
+            if self._lot_already_applied(pos, rec, action):
+                # 重复回放（rebuild 幂等）：lot 已在仓，不再累加
+                rec.position_id = pos.position_id
+                return {
+                    "position": pos,
+                    "warnings": warnings,
+                    "violations": violations,
+                    "accepted": True,
+                }
+
             pos.lots.append(Lot(
                 decision_id=getattr(rec, "decision_id", "") or "",
                 date=now,
                 action=action,
                 shares=int(rec.shares or 0),
                 price=float(rec.price or 0),
+                currency=getattr(rec, "currency", "") or "",
             ))
             self._recompute(pos)
             self.save(pos)
@@ -267,6 +393,15 @@ class PositionBook:
                 warnings.append(f"{ticker} 无 open position，卖出未入账到持仓")
                 return {
                     "position": None,
+                    "warnings": warnings,
+                    "violations": violations,
+                    "accepted": True,
+                }
+            if self._lot_already_applied(pos, rec, action):
+                # 重复回放（rebuild 幂等）：卖出已入账，不再重复扣减
+                rec.position_id = pos.position_id
+                return {
+                    "position": pos,
                     "warnings": warnings,
                     "violations": violations,
                     "accepted": True,
@@ -294,6 +429,7 @@ class PositionBook:
                 action=action,
                 shares=sold,
                 price=float(rec.price or 0),
+                currency=getattr(rec, "currency", "") or "",
             ))
             # FIFO consume already reduced remaining buy lots; the sell lot
             # is an audit trail and must not count toward shares.
@@ -349,13 +485,37 @@ class PositionBook:
         return self.save(pos)
 
     def rebuild_from_decisions(self, decision_log) -> dict:
-        """Replay decision_log in date order. Historical gaps get 待补全."""
+        """Replay decision_log in date order. Historical gaps get 待补全.
+
+        已对账持仓（reconciled_at 非空）跳过重放：其批次是券商/json 的权威口径，
+        新成交在录入时已经通过 apply_fill 叠加过，再放一遍会翻倍。"""
         recs = decision_log.list_decisions(limit=5000)
         recs = sorted(recs, key=lambda r: (r.decision_date or "", r.created_at or ""))
+
+        by_norm = {}
+        for p in self.list_all():
+            key = _norm_ticker(p.ticker)
+            if key not in by_norm or p.status == "open":
+                by_norm[key] = p
+        reconciled = {k for k, p in by_norm.items() if p.reconciled_at}
+
         opened = 0
         closed = 0
         attached = 0
+        skipped = 0
         for rec in recs:
+            key = _norm_ticker(getattr(rec, "ticker", ""))
+            if key in reconciled:
+                skipped += 1
+                pos = by_norm.get(key)
+                if pos:
+                    rec.position_id = pos.position_id
+                    if rec.decision_id:
+                        decision_log.conn.execute(
+                            "UPDATE decision_log SET position_id = ? WHERE decision_id = ?",
+                            [pos.position_id, rec.decision_id],
+                        )
+                continue
             result = self.apply_fill(rec, require_invalidation=False)
             if not result["accepted"]:
                 continue
@@ -376,6 +536,8 @@ class PositionBook:
         return {
             "decisions": len(recs),
             "attached": attached,
+            "reconciled": len(reconciled),
+            "skipped_reconciled": skipped,
             "open": len(self.list_open()),
             "all": len(self.list_all()),
         }
@@ -396,13 +558,18 @@ class PositionBook:
             lines.append(f"- **开仓:** {pos.opened_at}")
         if pos.closed_at:
             lines.append(f"- **平仓:** {pos.closed_at} ({pos.close_reason})")
+        if pos.reconciled_at:
+            lines.append(
+                f"- **已对账:** {str(pos.reconciled_at)[:10]}（rebuild 跳过）"
+                + (f"  {pos.reconciled_note}" if pos.reconciled_note else "")
+            )
         buy_lots = [l for l in pos.lots if l.action in ("BUY", "ADD") and l.shares > 0]
         if buy_lots:
             lines.append("- **剩余批次:**")
             for lot in buy_lots:
                 lines.append(
-                    f"  - {lot.date} {lot.action} {lot.shares:,} @ {lot.price} "
-                    f"[{lot.decision_id}]"
+                    f"  - {lot.date} {lot.action} {lot.shares:,} @ {lot.price:.3f} "
+                    f"{lot.currency or pos.currency} [{lot.decision_id or '对账批次'}]"
                 )
         return "\n".join(lines)
 
@@ -413,9 +580,56 @@ class PositionBook:
         ]
         pos.shares = sum(l.shares for l in remaining)
         if pos.shares > 0:
-            pos.avg_cost = sum(l.shares * l.price for l in remaining) / pos.shares
+            # 成本一律折算为持仓币种（人民币/美元/澳元成交 → 港币，见 currency_for_ticker）
+            cost_hkd = sum(l.shares * to_hkd(l.price, l.currency) for l in remaining)
+            pos.avg_cost = from_hkd(cost_hkd / pos.shares, pos.currency)
         else:
             pos.avg_cost = 0.0
+
+    def reconcile(self, ticker: str, lots, note: str = ""):
+        """按权威口径（券商 / portfolio_data.json）直接写入持仓批次。
+
+        lots: [(shares, price, currency), ...] 或 [{'shares','price','currency'}]。
+        价格按原币种给出，内部折算为持仓币种（港股=港币）后落库。
+
+        写入后 reconciled_at 非空 → rebuild_from_decisions 跳过该持仓，
+        之后新增的成交仍通过 apply_fill 正常叠加。
+        """
+        pos = self.get_open(ticker)
+        if pos is None:
+            rows = self.list_all(ticker=ticker)
+            pos = rows[0] if rows else None
+        if pos is None:
+            return None
+
+        target = currency_for_ticker(ticker) or pos.currency or "HKD"
+        pos.currency = target
+        today = datetime.now().date().isoformat()
+        new_lots: List[Lot] = []
+        for item in lots:
+            if isinstance(item, dict):
+                shares = int(item.get("shares") or 0)
+                price = float(item.get("price") or 0)
+                ccy = item.get("currency") or target
+            else:
+                shares = int(item[0])
+                price = float(item[1])
+                ccy = (item[2] if len(item) > 2 else "") or target
+            if shares <= 0:
+                continue
+            new_lots.append(Lot(
+                decision_id="",
+                date=today,
+                action="BUY",
+                shares=shares,
+                price=from_hkd(to_hkd(price, ccy), target),
+                currency=target,
+            ))
+        pos.lots = new_lots
+        pos.reconciled_at = datetime.now().isoformat()
+        pos.reconciled_note = note
+        self._recompute(pos)
+        return self.save(pos)
 
     def _consume_fifo(self, pos: Position, shares_to_sell: int):
         left = shares_to_sell

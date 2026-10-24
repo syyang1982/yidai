@@ -224,28 +224,84 @@ python manage.py decision add TICKER --confidence 4 --counter-argument "..." --i
 | W4.3 | 行业数据 | 半导体 BB 值、新能源车销量 | ⏸️ 暂缓 |
 | W4.4 | 替代数据 | 招聘数据、App 下载量、官网流量 | ⏸️ 暂缓 |
 
+### 2026-10-14 失效条件可自动观测（P0，本日完成）
+
+> 来源：2026-10-14 组合诊断。核心发现是「飞轮不闭环」：架构完整但无数据流入，
+> `review_results` / `alert_reviews` 均 0 行，失效条件无法自动触发。
+
+| # | 工作项 | 描述 | 状态 |
+|---|--------|------|------|
+| I1 | 指标历史表 | `leading_indicators.duckdb` 新增 `indicator_history`（ticker+name+period 主键，同周期幂等覆盖）；`update_value` 自动写历史。**没有历史表，「连续两季」在数据层就无从判定** | ✅ |
+| I2 | 失效评估器 | `src/strategy/invalidation_evaluator.py` — 读历史做「连续N期」判定，输出 触发/红/黄/绿/未知。单期红≠失效；`required_periods_from` 翻译「2季/3个月/1期」；恢复后连红重置 | ✅ |
+| I3 | 采集器 | `scripts/collect_invalidation_indicators.py` — 东财港股 `RPT_HKF10_FN_MAININDICATOR`（89字段）+ 美股逐项报表 + Yahoo 行情。一次回填 **76 条历史值**，覆盖 10 条可自动化指标 | ✅ |
+| I4 | 评估器解耦 | `evaluate_ticker(..., specs=)` 支持传入 specs，否则回退 WATCH 表。原实现硬绑定 WATCH，无法测试也无法监控新持仓 | ✅ |
+| I5 | LX 数据修正 | 净资产覆盖倍数 **10.7 → 15.49**。根因：乐信 1 ADS = 2 普通股，原值未统一 ADS 口径。**该失效腿实际是绿灯（15.49 ≫ 1.0），未造成误判** | ✅ |
+| I6 | 自动监控 cron | `91302eced8be` 每交易日 19:00 — 采集 → 评估 → 对比 `db/invalidation_monitor_state.json` → 变化才提醒 | ✅ |
+| I7 | 回归测试 | `tests/test_strategy/test_invalidation_evaluator.py` 20 个用例（历史幂等/连续判定/期数翻译/单期不触发/恢复重置/越低越好） | ✅ |
+
+**当前真实失效视图**：12 持仓 / 35 条腿 — 触发 0 · 红 2 · 黄 2 · 绿 13 · 未知 18
+
+- 🔴 **名创 海外同店 -3.0% [2026H1]** — 第 1 期红。Q3 财报（预计 11 月）若再为负即触发失效 → D2 直接受益
+- 🔴 **速腾 经营现金流 -4.20亿 [2026-06-30]** — 连红 3 期，但该腿判定为 1 期，需人工判定是否构成失效
+- 🟢 **LX 净资产覆盖倍数 15.49**（修正后）— D1 的「每股净资产不再覆盖市值」这条失效腿**未触发**
+
+**遗留（诚实记录）**：18 条腿仍无数据，需人工或网络检索 — SU7月交付、FILA/始祖鸟同店、
+手术量、车型定点数、大客户CapEx、DAU、广告收入、存货周转、IP授权、新游流水、版号、
+SGP.AX 全部 3 条（东财无澳股数据）。这些是运营数据，不在财报 API 覆盖范围内。
+
+**未做（下一步候选）**：触发历史表 — 03888 曾在 2025 连续两季红后恢复，若不记录
+「曾经触发过」，这类事件会永久丢失。见 `W6.x`。
+
 ### 2026-09-22 持仓诊断待办（P0 决策类）
 
 > 来源：2026-09-22 组合诊断。价格 -14.1%、4 只票占 85.6% 浮亏、3 条 CRITICAL 卖出提醒。
 
 | # | 工作项 | 描述 | 状态 |
 |---|--------|------|------|
-| D1 | 乐信 LX 终局判定 | 查 2026Q2 每股净资产 vs 市值、不良率/信贷成本、股息是否维持。触发失效条件 → 清仓剩余；未触发 → 写观察哨 + 检查日期 | 🔲 |
-| D2 | 名创 9896.HK 锁定 Q3 判决日 | 海外同店 Q2+Q3 是否连续负增长。财报日复核，跌破 HK$12 强制清仓 | 🔲 |
-| D3 | 速腾 2498.HK 硬止损豁免备案 | thesis 止损 HK$12，写决策日志 + 观察哨（Q3 毛利率 ≥20%、车型定点数未连续两季净减少），豁免到期 2026-12-31 | 🔲 |
-| D4 | 9/13-14 决策复核 | confidence + counter_argument 填充率检查（旧决策多为空，认知偏差检测失效） | 🔲 |
+| D1 | 乐信 LX 终局判定 | 查 2026Q2 每股净资产 vs 市值、不良率/信贷成本、股息是否维持。触发失效条件 → 清仓剩余；未触发 → 写观察哨 + 检查日期 | ✅ **失效已触发**（不良率连升3季，条件需2期）待用户拍板 |
+| D2 | 名创 9896.HK 锁定 Q3 判决日 | 海外同店 Q2+Q3 是否连续负增长。财报日复核，跌破 HK$12 强制清仓 | ✅ 判决日=11月下旬（历史模式11/21，尚未公告）；Q2已红第1期 |
+| D3 | 速腾 2498.HK 硬止损豁免备案 | thesis 止损 HK$12，写决策日志 + 观察哨（Q3 毛利率 ≥20%、车型定点数未连续两季净减少），豁免到期 2026-12-31 | ✅ 三项失效均未触发；毛利率21.79%距红线1.79pp，定点数186→194净增 |
+| D4 | 9/13-14 决策复核 | confidence + counter_argument 填充率检查（旧决策多为空，认知偏差检测失效） | ✅ 发现两问题：执行未闭环 + **数据归属污染**（agent文本混入用户决策字段） |
+
+> 复盘全文：`knowledge/analysis/2026-10-14-d1-d4-review.md`
+> 关键工程修复（D1 复盘中发现）：评估器原只有**水平判定**，会漏掉
+> 「值未到极端区间但连续N期恶化」的腿——LX 不良率 3.6% 就是这样被误判为安全。
+> 已加**趋势判定** `consecutive_periods_trending`，任一判定满足即触发。1015 tests pass。
+
+#### D4 衍生修复：决策归属分离（2026-10-14 完成）
+
+用户指出「自我批评不是我写的」，查实：`lessons.md #7` 与 decision_log 里 5 段
+`review_notes` 的「复盘: 否决止损是沉没成本谬误」**均为 agent 文本**，与用户 9/13
+真实决策（HOLD, confidence 3-4）方向相反，且无作者标注。危害：W9.4 认知偏差检测读的
+正是这些字段 —— **检测的是 agent 的话，不是用户的决策，填充率多高都测不出东西**。
+
+| # | 修复 | 说明 |
+|---|------|------|
+| A1 | `decision_log` 加 `author` / `agent_review` 列 | `author` = 谁做的决策（user/agent/agent_mixed/unknown）；agent 分析只能进 `agent_review` |
+| A2 | `DecisionRecord` 加同名字段 + 写入路径 | `review_notes`/`lessons` 归属用户，`agent_review` 归属 agent，严格分开 |
+| A3 | 迁移 5 条污染记录 | agent 文本移入 `agent_review`，`review_notes` 清空，`author='agent_mixed'`；存量未标注记录标 `unknown`（不能假设都是用户写的） |
+| A4 | 补建表 schema + ALTER 兜底 | CREATE TABLE 与 ALTER 列表都加了新列。**教训：在 INSERT 列清单中间插列，必须同步改 CREATE TABLE，否则新库建表 42 列而 INSERT 44 列，全量测试直接炸 33 failed + 15 errors** |
+| A5 | 用户 LX 继持决策入库 | `decision_id=e38f24f0`, `author='user'`, `confidence_level=0`（用户未给信心分，**不代填**） |
+
+**归属分离后的 author 分布**：unknown 45 / agent_mixed 5 / user 1
+> 45 条 unknown 是历史遗留，无法回溯归属——**复盘时这些记录不得当作用户立场引用**。
+
+回归测试 `tests/test_strategy/test_decision_attribution.py` 6 例。全量 **1021 passed**。
 
 ### 2026-09-22 数据修复待办（P1/P2 工程类）
 
 | # | 工作项 | 描述 | 状态 |
 |---|--------|------|------|
 | W5.1 | constraints 读真实持仓 | `cmd_constraints` 现用 `create_sample_holdings()` 假数据 → 假绿灯（小米 61.1% 超 30% 硬线却报合规） | ✅ 2026-09-22 改读 portfolio_data.json |
-| W5.2 | 对账两套持仓数据 | decisions.duckdb vs portfolio_data.json：5 处股数（LX/2252/3896/09988/01810）+ 1 处均价（3888）不一致，需确认口径 | ⏳ `manage.py loop` 已能自动检出（实测 7 处），口径待用户确认后 `position set` 修正 |
+| W5.2 | 对账两套持仓数据 | decisions.duckdb vs portfolio_data.json：5 处股数（LX/2252/3896/09988/01810）+ 1 处均价（3888）不一致，需确认口径 | ✅ 2026-09-25 用户裁决后完成：01810=37,400 / 2252=1,500 / 9988=3,100 / LX=2,250 以 json 为准，3896 以券商口述为准（12,000 = 8,000@¥4.708 + 4,000@HK$5.01，覆盖 json 的 10,000@5.651），3888 股数 4,400。新增 `position reconcile`（写权威批次 + `reconciled_at`，rebuild 跳过）+ `Lot.currency` + `to_hkd/from_hkd`（口径：港股成本一律港币、人民币按汇率折算），并回填了存量 lots 币种。实测 `manage.py loop` 两库对账 7 处 → 全部一致，`position rebuild` 连跑 2 次股数/行数不变，986 passed。同日二裁 3888 均价：券商 2,400@¥23.997 + 2,000@HK$24.52 → 综合 HK$26.148（决策库与 json 已同口径）。共 6 只持仓已 reconcile。遗留：decision_log 历史漏记误记（LX 9/14 REDUCE 900、2252/9988 漏记成交等）未清理，已由对账隔离、不影响持仓与提醒 |
 | W5.3 | dashboard.py CNY→HKD 换算 | 名创显示 -54.7% 应为 -60.5%（sell_alert.py 已修，dashboard.py 未跟上） | ✅ 2026-09-22 改用 `to_hkd`，实测 -60.5% |
-| W5.4 | ASX 持仓漏计 | dashboard 完全不显示 SGP.AX；portfolio_status 总计漏计，dashboard 又按 1:1 当 HKD | ✅ 2026-09-22 补 AUD_PER_HKD=0.17936，实测显示 +7.2%、总市值 +25,206 HKD |
+| W5.4 | ASX 持仓漏计 | dashboard 完全不显示 SGP.AX；portfolio_status 总计漏计，dashboard 又按 1:1 当 HKD | ✅ 2026-09-22 dashboard 补 AUD_PER_HKD=0.17936；2026-09-25 发现 portfolio_status.py 仍只分 USD/HKD/CNY 三组 → SGP.AX 整段不渲染、TOTAL 少 25,145 HKD（成本少 23,520），已补 AUD 分组 + 成本/市值换算 + 未识别币种兜底桶 + 渲染行数完整性核对，实测 TOTAL 1,631,153 与 dashboard 一致 |
 | W5.5 | 小米集中度显式备案 | 61.1% 超 30% 硬线，写成「已知偏离 + 计划」（HK$33-35 减 1-2K 短线仓、核心 ~34K） | 🔲 待用户决策 |
 | W5.6 | 清理 1361.HK 残留 | 0 股仍占 dashboard 一行 + sell_targets 目标价 HK$6.5 | ⏳ dashboard 已归入「已清仓（0 股，不计入）」，sell_targets 待清 |
 | W5.7 | 3888.HK 金山软件观察 | REDUCE 24/40、-6.6%，止损 -30%，不加仓 | 🔲 待用户决策 |
+| W5.8 | `position rebuild` 非幂等 | 每跑一次把所有持仓 lot 重放一遍 → 股数翻倍（实测 12 个 open 全部 ×2），已平仓持仓还会重复新增行 | ✅ 2026-09-25 `PositionBook.apply_fill` 按 decision_id（缺 id 时按日期+方向+股数+价格）去重，重放已平仓买入时复用原记录；实测连跑 2 次股数/行数完全不变 |
+| W5.9 | loop 两库对账假差异 | `_norm_ticker` 没统一 `.ASX`/`.AX`，SGP.AX 同一持仓被报成 2 处差异 | ✅ 2026-09-25 归一后 7 → 0 |
+| W5.10 | decision_log 历史漏记/误录 | 决策净额与券商对不上：LX 漏 450 股且首笔价格记成综合均价、9/14 REDUCE 900 无成交；01810 SC 批 12,000 vs 12,400；2252 漏 1,000 股；600036 买入被录成 REDUCE 且漏 7/3 卖出 | ✅ 2026-09-25 已改：LX 首笔改 1,800@US$6.29 + 补 450@2.11 + 9/14 改 HOLD（清 sell_reason）；01810 SC 改 12,400@39.688；2252 补 1,000@24.24；600036 6/30 改 BUY + 补 7/3 卖 300@36.82。14 只中 11 只决策净额=券商；**遗留 3 只需券商成交明细**：3896（决策 14,000 / trade-log 摘要 10,000 / 券商 12,000 三套数）、9988（trade-log #013 只写「+400 more later +100 later」，价格日期皆缺）、1361（两套持仓互斥，缺第二段 6,000 股的买入记录，P/L 备注暗示成本 HK$4.57）|
 
 ### 2026-09-22 闭环打通（W7）
 
@@ -263,6 +319,16 @@ python manage.py decision add TICKER --confidence 4 --counter-argument "..." --i
 | W7.8 | 回测漏评 D6 导致 BUY 被压制 | `backtest.py` 只评 7 维却把 total(满分35)喂给 8 维/40 分校准的 `_compute_grade`/`_compute_signal`（BUY 需 ≥33 = 35 里拿 94%）→ 回测几乎永不 BUY | ✅ 2026-09-22 与 scorer.py 同口径评 D6 |
 | W7.9 | 测试漂移清理 | 8 个失败全在改动前就存在（已用干净 HEAD worktree 对照确认）：6 个是 /35→/40 分档未同步、2 个是硬编码日期随时间腐烂 | ✅ 982 passed / 0 failed |
 | W7.10 | 无分红公司结构性够不到 A | `dividend=0 表示「无数据」`（代码注释明写），却仍按 0 计入 total → 不发股息的成长股满分只有 35，比发股息的低一档 | ✅ 2026-09-22 按实评维度归一化（用户裁决）：新增 `models.normalize_total` + `ScoreResult.scored_dimensions/normalized_total`，`dividend_quality.score` 增 `has_data`；`scorer`/`backtest`/`review`(3处)/`manage.py`(2处)/5 个 `scripts/analyze_*.py` 共 12 个调用点全改 |
+
+### 2026-10-05 事件引擎待办（E1-E3）
+
+> 来源：2026-10-05 事件简报 cron。`manage.py events --days 3` 报「未来3天共 41 条事件」，实际是**同一事件的 41 份拷贝**。
+
+| # | 工作项 | 描述 | 状态 |
+|---|--------|------|------|
+| E1 | events.duckdb 无去重 | `EventStore.add_event` 对 `--refresh` 无条件 INSERT（uuid 主键不冲突）→ 1,395 行只有 35 个唯一事件，每跑一次 +34 行。需按 `(title, event_date, event_type)` 幂等 upsert 并清理存量重复 | ✅ 2026-10-24 修复+验证：`add_event(dedup=True)` 按业务键（类型+标题+日期+来源）跳重、`dedupe()` 清存量、`--refresh` 改为重建内置日历（先删旧内置再插）。实测连跑两次 refresh 行数稳定 52 行=52 唯一、0 重复组 |
+| E2 | RBA 决议日全错 | `src/events/calendars.py` 硬编码的 2026 六次 RBA 日期（07-08/08-05/09-02/10-07/11-04/12-02）全部与官方不符；官方 2026：02-03、03-17、05-05、06-16、08-11、09-29、11-03、12-08（**10 月无会议**）→ 10-07「澳洲RBA利率决议」是幽灵事件，且 RBA 是 SGP.ASX 的核心变量 | ✅ 2026-10-24：RBA 已按官方 8 日期落库（10-07 幽灵事件已清）。同批按官方源核对修正：FOMC 7-30→7-29、9-17→9-16、10-29→**10-28**、12-17→**12-09**（federalreserve.gov）、中期选举 11-05→**11-03**、美国10月CPI 11-12→**11-10**（BLS）。calendars.py 头部已注释核对来源 |
+| E3 | `events --type` 直接崩溃 | `manage.py:1427` 调 `store.get_by_type(event_type, days=days)`，但 `EventStore.get_by_type()` 不接受 `days` → TypeError（2026-10-05 实测复现） | ✅ 2026-10-24：`get_by_type(event_type, days=None)` 已收 days（None=全量原语义），实测 `events --type earnings --days 30` 正常返回。`tests/test_events/` 67 passed（含跳重/dedupe/get_by_type 窗口回归） |
 
 ---
 
@@ -288,3 +354,5 @@ python manage.py decision add TICKER --confidence 4 --counter-argument "..." --i
 | 2026-09-22 | 📋 W7.10 记录设计取舍：无分红公司 total 满分只有 35，结构性够不到 A / BUY |
 | 2026-09-22 | ✅ W7.10 按实评维度归一化落地（用户裁决）。扫出并修掉 12 个同类调用点，含 6 处**从没成功跑过**的 `_compute_signal` 少传 dividend + dict 当 int 求和；`analyze` 显示改为「raw N/M（实评 k/8 维 → 归一 X/40）」。983 passed / 0 failed |
 | 2026-09-22 | 📌 W5.2 两库对账仅登记待办（用户明确不动手）：7 处不一致 = 5 处股数 + 2 处 ticker 写法（`SGP.AX`/`SGP.ASX`、`01810.HK`/`1810.HK`），口径确认后用 `position set` 修 |
+| 2026-10-05 | 📋 事件引擎待办登记 E1-E3：events.duckdb 刷一次 +34 行无去重（1,395 行/35 唯一）、RBA 2026 日期全错（10-07 为幽灵事件）、`events --type` TypeError |
+| 2026-10-24 | ✅ E1-E3 事件引擎修复完成并验证：去重+存量清理（1,395 行 → 52 行=52 唯一）、`--refresh` 重建内置日历（错误日期/幽灵事件不再残留）、RBA+FOMC+CPI+中期选举日期按官方源修正、`events --type` 修复。`tests/test_events/` 67 passed |

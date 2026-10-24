@@ -1036,6 +1036,7 @@ def cmd_position(args):
         print("    python manage.py position show 01810.HK")
         print("    python manage.py position set 01810.HK --thesis \"...\" --invalidation \"...\" --book compound --horizon 12m")
         print("    python manage.py position rebuild")
+        print('    python manage.py position reconcile <ticker> --lots "8000@4.708 CNY,4000@5.01 HKD" --note "..."')
         print("    python manage.py position watch                 失效观测红黄绿")
         return
 
@@ -1095,14 +1096,47 @@ def cmd_position(args):
         print(book.to_markdown(pos))
         return
 
+    if action == "reconcile":
+        import re as _re
+        spec = getattr(args, "lots", None)
+        if not ticker or not spec:
+            print('  用法: python manage.py position reconcile <ticker> \\')
+            print('          --lots "8000@4.708 CNY,4000@5.01 HKD" --note "按券商对账"')
+            return
+        lots = []
+        for tok in _re.split(r"[,;+]", spec):
+            tok = tok.strip()
+            if not tok:
+                continue
+            m = _re.match(r"^([\d,]+)\s*@\s*([\d.]+)\s*([A-Za-z]{3})?$", tok)
+            if not m:
+                print(f"  ❌ 批次格式无法解析: {tok}")
+                print('     示例: "8000@4.708 CNY,4000@5.01 HKD"')
+                return
+            lots.append((
+                int(m.group(1).replace(",", "")),
+                float(m.group(2)),
+                (m.group(3) or "").upper(),
+            ))
+        pos = book.reconcile(ticker, lots, note=getattr(args, "note", None) or "")
+        if pos is None:
+            print(f"  ❌ 无 position: {ticker}。先 decision add 或 position rebuild")
+            return
+        print(f"  ✅ 已按权威口径对账（rebuild 将跳过该持仓）:")
+        print(book.to_markdown(pos))
+        return
+
     if action == "watch":
         from src.analysis.leading_indicators import LeadingIndicatorStore
-        from src.strategy.invalidation_watch import format_watch, sync
+        from src.strategy.invalidation_evaluator import evaluate_all, format_report
+        from src.strategy.invalidation_watch import sync
         store = LeadingIndicatorStore()
         stats = sync(store)
         print(f"  观测表已对齐: 注册 {stats['registered']}  种子 {stats['seeded']}  从短码复制 {stats['copied']}")
         print()
-        print(format_watch(store, book.list_open()))
+        opens = book.list_open()
+        evals = evaluate_all(store, opens)
+        print(format_report(evals, positions=opens, show_all=True))
         return
 
     if action == "rebuild":
@@ -1113,10 +1147,15 @@ def cmd_position(args):
             f"(open {stats['open']})"
         )
         print("  历史持仓失效条件为「待补全」，用 position set 补全。")
+        if stats.get("reconciled"):
+            print(
+                f"  🔒 已对账持仓 {stats['reconciled']} 个被跳过"
+                f"（{stats.get('skipped_reconciled', 0)} 笔决策未重放）：批次以券商/json 为准"
+            )
         return
 
     print(f"  未知操作: {action}")
-    print("  可用: list, show, set, rebuild")
+    print("  可用: list, show, set, rebuild, reconcile, watch")
 
 
 def cmd_signal(args):
@@ -1360,12 +1399,30 @@ def cmd_events(args):
             print(writer.format_daily_briefing(new_events))
 
     elif getattr(args, "refresh", False):
-        # 刷新预知事件
+        # 刷新预知事件 — 以 calendars.py 为唯一真相重建内置事件（E1/E2 根因修复）
+        # 过去: 每次 refresh 无条件 INSERT 34 条 → 累积成 1395 行(35 唯一)；
+        #       且内置日历改了日期后，旧错误行（如 RBA 幽灵事件 10-07）永远残留。
+        # 现在: 先删掉来源为"内置日历/财报日历"的旧行，再插入当前 calendars.py 的内容；
+        #       来自 RSS 的 breaking/product 事件保留，并按业务键去重。
         collector = EventCollector()
         events = collector.collect_all(tickers)
-        for e in events:
-            store.add_event(e)
-        print(f"更新 {len(events)} 条预知事件")
+
+        stale = store.conn.execute(
+            "DELETE FROM market_events WHERE source IN ('内置日历', '财报日历') RETURNING 1"
+        ).fetchall()
+        removed = len(stale)
+
+        builtin = [e for e in events if e.source in ('内置日历', '财报日历')]
+        others = [e for e in events if e.source not in ('内置日历', '财报日历')]
+
+        inserted_builtin = store.add_events(builtin, dedup=False)
+        inserted_other = store.add_events(others, dedup=True)
+        dup_removed = store.dedupe()
+
+        total_row = store.conn.execute("SELECT count(*) FROM market_events").fetchone()
+        total = int(total_row[0]) if total_row else 0
+        print(f"刷新预知事件: 新增 {len(inserted_builtin)} 条内置 + {len(inserted_other)} 条RSS")
+        print(f"清理: 过期内置 {removed} 行, 重复 {dup_removed} 行, 当前共 {total} 行")
         # 生成日历文件
         path = writer.write_calendar(events)
         print(f"日历已写入: {path}")
@@ -2001,8 +2058,8 @@ def main():
     # position
     p_position = subparsers.add_parser("position", help="持仓实体：论点/失效条件/批次")
     p_position.add_argument("position_action", nargs="?", default=None,
-                            choices=["list", "show", "set", "rebuild", "watch"],
-                            help="操作: list/show/set/rebuild/watch")
+                            choices=["list", "show", "set", "rebuild", "watch", "reconcile"],
+                            help="操作: list/show/set/rebuild/watch/reconcile")
     p_position.add_argument("ticker_or_id", nargs="?", help="股票代码")
     p_position.add_argument("--ticker", help="股票代码")
     p_position.add_argument("--thesis", help="投资论点")
@@ -2012,6 +2069,8 @@ def main():
     p_position.add_argument("--max-size", type=float, dest="max_size", help="仓位上限 %%")
     p_position.add_argument("--status", choices=["open", "closed", "all"], default="open",
                             help="list 过滤（默认 open）")
+    p_position.add_argument("--lots", help='reconcile 批次，如 "8000@4.708 CNY,4000@5.01 HKD"')
+    p_position.add_argument("--note", help="reconcile 对账说明")
 
     # events
     p_events = subparsers.add_parser("events", help="事件管理：显示/扫描/刷新")
